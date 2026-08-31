@@ -143,87 +143,135 @@ fn check_capture() -> Check {
     }
 }
 
-/// Аппаратный энкодер NVENC.
+/// Аппаратный энкодер: NVENC, а при его отсутствии — Media Foundation.
+///
+/// # Почему Media Foundation проверяется ВСЕГДА
+///
+/// Раньше вся эта функция сводилась к одной ветке `cfg`: без
+/// `nvenc_available` она сразу возвращала отказ, и до Media
+/// Foundation дело не доходило. Пока LLVM был обязателен для сборки,
+/// это ничего не меняло — флаг стоял всегда.
+///
+/// После находки 61 клиент собирается без LLVM, и ветка «NVENC не
+/// собран» стала обычным делом. Тогда и выяснилось, что она **не
+/// проверяет ничего**: машина с исправным AMD-энкодером получала
+/// «энкодера нет», хотя `MfEncoder` от NVENC не зависит ни в чём.
+///
+/// Компилятор об этом честно предупреждал — `try_media_foundation is
+/// never used`, — но предупреждение появлялось только на сборке без
+/// LLVM, то есть у того, кто и так видел неверный вывод, а не у того,
+/// кто мог его исправить.
+///
+/// Тот же класс, что находки 47, 55, 61: путь, отключённый заодно с
+/// соседним, хотя от него не зависит.
 #[cfg(windows)]
 fn check_encoder() -> Check {
-    #[cfg(not(nvenc_available))]
-    {
-        // Причин ровно две, и они требуют РАЗНЫХ действий, поэтому
-        // называть надо обе. Прежний текст говорил только про
-        // заголовок — а на машине без LLVM заголовок как раз на
-        // месте, и человек шёл искать несуществующую проблему
-        // (находка 61).
-        Check::Failed(
-            "бэкенд NVENC не собран.\n     \
-             Причина одна из двух: нет vendor/nvcodec/nvEncodeAPI.h \
-             (см. vendor/nvcodec/README.md)\n     \
-             либо на машине не установлен LLVM/libclang, нужный для \
-             генерации биндингов.\n     \
-             Точную причину печатает сама сборка: cargo build 2>&1 | \
-             findstr NVENC\n     \
-             Это про сборку, а не про машину. Для КЛИЕНТА NVENC не \
-             нужен вовсе — смотрите вывод ниже."
-                .into(),
-        )
+    use bd_capture::windows::{enumerate_monitors, DxgiCapturer};
+    use bd_capture::Capturer;
+    use bd_core::time::Epoch;
+
+    // Энкодеру нужно устройство D3D11, а оно живёт в капчурере.
+    // Если захват не работает, про энкодер сказать нечего —
+    // и это честный ответ, а не «не проверено».
+    let monitors = match enumerate_monitors() {
+        Ok(m) if !m.is_empty() => m,
+        _ => return Check::Failed("нечего проверять: нет мониторов".into()),
+    };
+    let capturer = match DxgiCapturer::new(monitors[0].index, Epoch::new()) {
+        Ok(c) => c,
+        Err(_) => {
+            return Check::Failed(
+                "не проверен: без захвата нет устройства D3D11 для энкодера".into(),
+            )
+        }
+    };
+
+    let size = capturer.size();
+
+    // Сначала NVENC, если бэкенд собран. `None` означает «не собран»,
+    // а не «не работает» — это разные вещи, и путать их нельзя:
+    // первое про сборку, второе про машину.
+    match try_nvenc(&capturer, size) {
+        Some(Ok(details)) => Check::Ok(details),
+        // NVENC есть, но отказал. Media Foundation покрывает Intel
+        // QuickSync, AMD VCE и прочее аппаратное железо, поэтому его
+        // неудача больше не означает «хостом быть нельзя».
+        Some(Err(e)) => match try_media_foundation(&capturer, size) {
+            Ok(name) => Check::Ok(format!(
+                "Media Foundation: {name}\n     \
+                 (NVENC недоступен, и это нормально: {e})"
+            )),
+            Err(mf_err) => Check::Failed(format!(
+                "аппаратного энкодера нет.\n     \
+                 NVENC: {e}\n     \
+                 Media Foundation: {mf_err}\n     \
+                 Хостом эта машина быть не сможет, клиентом — да."
+            )),
+        },
+        // Бэкенд не собран — но это ничего не говорит о машине.
+        None => match try_media_foundation(&capturer, size) {
+            Ok(name) => Check::Ok(format!(
+                "Media Foundation: {name}\n     \
+                 (бэкенд NVENC не собран — нет LLVM/libclang; для этой\n     \
+                 машины он и не нужен, энкодер найден другой)"
+            )),
+            Err(mf_err) => Check::Failed(format!(
+                "аппаратного энкодера нет.\n     \
+                 Media Foundation: {mf_err}\n     \
+                 NVENC не проверялся: бэкенд не собран (нет LLVM/libclang).\n     \
+                 Если в машине стоит видеокарта NVIDIA — поставьте LLVM\n     \
+                 (https://releases.llvm.org) и повторите: возможно, хостом\n     \
+                 она быть сможет.\n     \
+                 Клиентом — в любом случае да, если декодер ниже ✅."
+            )),
+        },
     }
+}
 
-    #[cfg(nvenc_available)]
-    {
-        use bd_capture::windows::{enumerate_monitors, DxgiCapturer};
-        use bd_capture::Capturer;
-        use bd_codec::nvenc::NvencEncoder;
-        use bd_codec::EncoderConfig;
-        use bd_core::time::Epoch;
+/// Попробовать NVENC.
+///
+/// `None` — бэкенд не собран (нет LLVM/libclang); `Some(Err)` — собран,
+/// но отказал. Разница существенна: первое про сборку и лечится
+/// установкой LLVM, второе про машину и означает отсутствие NVIDIA.
+///
+/// Отдельная функция, а не блок `cfg` внутри вызывающего: там она
+/// заставляла бы вызывающего заканчиваться по-разному в двух
+/// конфигурациях, и одна из веток обрастала бы `return`, лишними в
+/// другой (на что clippy справедливо жалуется).
+#[cfg(all(windows, nvenc_available))]
+fn try_nvenc(
+    capturer: &bd_capture::windows::DxgiCapturer,
+    size: bd_core::frame::FrameSize,
+) -> Option<Result<String, String>> {
+    use bd_codec::nvenc::NvencEncoder;
+    use bd_codec::EncoderConfig;
+    use bd_core::time::Epoch;
 
-        // Энкодеру нужно устройство D3D11, а оно живёт в капчурере.
-        // Если захват не работает, про энкодер сказать нечего —
-        // и это честный ответ, а не «не проверено».
-        let monitors = match enumerate_monitors() {
-            Ok(m) if !m.is_empty() => m,
-            _ => return Check::Failed("нечего проверять: нет мониторов".into()),
-        };
-        let capturer = match DxgiCapturer::new(monitors[0].index, Epoch::new()) {
-            Ok(c) => c,
-            Err(_) => {
-                return Check::Failed(
-                    "не проверен: без захвата нет устройства D3D11 для энкодера".into(),
-                )
-            }
-        };
+    let config = EncoderConfig::low_latency(size, 60);
+    let bitrate = config.rate_control.target_bitrate();
 
-        let size = capturer.size();
-        let config = EncoderConfig::low_latency(size, 60);
-        let bitrate = config.rate_control.target_bitrate();
-
-        // SAFETY: устройство принадлежит `capturer`, который жив до
-        // конца функции; энкодер дропается раньше него.
+    // SAFETY: устройство принадлежит `capturer`, который жив дольше
+    // энкодера — тот дропается до возврата из этой функции.
+    Some(
         match unsafe { NvencEncoder::new(capturer.device_ptr(), config, Epoch::new()) } {
-            Ok(_) => Check::Ok(format!(
+            Ok(_) => Ok(format!(
                 "NVENC открыл сессию {}x{}@60, CBR {} Мбит/с",
                 size.width,
                 size.height,
                 bitrate / 1_000_000
             )),
-            Err(e) => {
-                // NVENC — не единственный путь. Media Foundation
-                // покрывает Intel QuickSync, AMD VCE и прочее
-                // аппаратное железо, поэтому его неудача больше не
-                // означает «хостом быть нельзя».
-                match try_media_foundation(&capturer, size) {
-                    Ok(name) => Check::Ok(format!(
-                        "Media Foundation: {name}\n     \
-                         (NVENC недоступен, и это нормально: {e})"
-                    )),
-                    Err(mf_err) => Check::Failed(format!(
-                        "аппаратного энкодера нет.\n     \
-                         NVENC: {e}\n     \
-                         Media Foundation: {mf_err}\n     \
-                         Хостом эта машина быть не сможет, клиентом — да."
-                    )),
-                }
-            }
-        }
-    }
+            Err(e) => Err(e.to_string()),
+        },
+    )
+}
+
+/// Бэкенд NVENC не собран — проверять нечего.
+#[cfg(all(windows, not(nvenc_available)))]
+fn try_nvenc(
+    _capturer: &bd_capture::windows::DxgiCapturer,
+    _size: bd_core::frame::FrameSize,
+) -> Option<Result<String, String>> {
+    None
 }
 
 /// Аппаратный декодер H.264.
