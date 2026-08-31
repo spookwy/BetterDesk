@@ -70,6 +70,25 @@ pub enum PayloadKind {
     Audio,
     /// Событие ввода.
     Input,
+    /// Позиция курсора.
+    ///
+    /// # Почему у курсора свой вид, а не `Video`
+    ///
+    /// Пока курсор ехал отдельным соединением, вид в его заголовке
+    /// не значил ничего: в том канале не было ничего другого, и
+    /// позиция ходила под кодом `Video` просто потому, что код
+    /// требовалось указать (находка 56).
+    ///
+    /// В сведённом соединении вид становится адресом. Позиция под
+    /// кодом `Video` попала бы в сборку видеокадров, где своя
+    /// нумерация, — и оба потока молча выбрасывали бы друг друга как
+    /// устаревшие. Ровно тот дефект, что в находке 39, но внутри
+    /// одной стороны.
+    ///
+    /// Отдельный вид, а не `Control`: форма курсора весит килобайты
+    /// и меняется редко, позиция — девять байт сотни раз в секунду.
+    /// Общая нумерация заставила бы позицию ждать формы.
+    Cursor,
     /// Управляющее сообщение.
     Control,
 }
@@ -82,8 +101,22 @@ impl PayloadKind {
             PayloadKind::Audio => 2,
             PayloadKind::Input => 3,
             PayloadKind::Control => 4,
+            // Курсор получил код 5, а не место рядом с видео:
+            // существующие коды сдвигать нельзя, иначе стороны разных
+            // сборок разобрали бы одни и те же байты по-разному.
+            PayloadKind::Cursor => 5,
         }
     }
+
+    /// Все виды — для проверок полноты кодирования.
+    #[cfg(test)]
+    const ALL: [Self; 5] = [
+        Self::Video,
+        Self::Audio,
+        Self::Input,
+        Self::Control,
+        Self::Cursor,
+    ];
 
     /// Разобрать код вида.
     const fn from_code(code: u8) -> Option<Self> {
@@ -92,6 +125,7 @@ impl PayloadKind {
             2 => Some(PayloadKind::Audio),
             3 => Some(PayloadKind::Input),
             4 => Some(PayloadKind::Control),
+            5 => Some(PayloadKind::Cursor),
             _ => None,
         }
     }
@@ -272,6 +306,34 @@ mod tests {
         sample().write_to(&mut buf).expect("запись");
         buf[0] = PROTOCOL_VERSION.wrapping_add(1);
         assert!(FragmentHeader::parse(&buf).is_err());
+    }
+
+    #[test]
+    fn every_kind_survives_the_wire() {
+        // Вид нагрузки стал адресом: по нему приёмник выбирает, в
+        // какую сборку класть фрагмент. Код, потерявшийся при
+        // кодировании, не даст ошибки — просто один из потоков
+        // перестанет доходить, и искать причину будут не здесь.
+        for kind in PayloadKind::ALL {
+            let mut buf = vec![0u8; HEADER_SIZE];
+            FragmentHeader { kind, ..sample() }
+                .write_to(&mut buf)
+                .expect("запись");
+            let (header, _) = FragmentHeader::parse(&buf).expect("разбор");
+            assert_eq!(header.kind, kind, "вид {kind:?} не пережил путь");
+        }
+    }
+
+    #[test]
+    fn kind_codes_are_distinct() {
+        // Два вида с одним кодом означали бы, что приёмник кладёт их
+        // в одну сборку, — то есть ровно тот дефект, ради устранения
+        // которого состояние сборщика разделено по видам.
+        let mut codes: Vec<u8> = PayloadKind::ALL.iter().map(|k| k.code()).collect();
+        codes.sort_unstable();
+        let before = codes.len();
+        codes.dedup();
+        assert_eq!(codes.len(), before, "коды видов обязаны быть различны");
     }
 
     #[test]

@@ -150,7 +150,12 @@ pub struct LoopbackTransport {
     epoch: Epoch,
     in_flight: VecDeque<InFlight>,
     stats: TransportStats,
-    sequence: u64,
+    /// Номер следующего кадра — свой у каждого вида нагрузки.
+    ///
+    /// Причина раздельности та же, что у QUIC: в одном канале виды
+    /// с общим счётчиком видели бы дыры на месте чужих номеров и
+    /// считали бы их потерями (см. `QuicTransport::next_sequence`).
+    sequence: Vec<(PayloadKind, u64)>,
     /// Состояние генератора псевдослучайных чисел для потерь.
     ///
     /// Свой xorshift, а не `rand`: одна зависимость меньше, а качество
@@ -174,7 +179,7 @@ impl LoopbackTransport {
             epoch,
             in_flight: VecDeque::new(),
             stats: TransportStats::default(),
-            sequence: 0,
+            sequence: Vec::new(),
             rng: 0x9E37_79B9_7F4A_7C15,
         }
     }
@@ -209,8 +214,15 @@ impl LoopbackTransport {
         data: &[u8],
         timings: &mut FrameTimings,
     ) -> Result<u64> {
-        let sequence = self.sequence;
-        self.sequence += 1;
+        let counter = match self.sequence.iter().position(|(k, _)| *k == kind) {
+            Some(index) => index,
+            None => {
+                self.sequence.push((kind, 0));
+                self.sequence.len() - 1
+            }
+        };
+        let sequence = self.sequence[counter].1;
+        self.sequence[counter].1 += 1;
 
         timings.mark(Stage::Sent, self.epoch.stamp_now());
 
@@ -431,6 +443,64 @@ mod tests {
             .send(PayloadKind::Video, false, b"b", &mut timings)
             .expect("отправка");
         assert_eq!(second, first + 1);
+    }
+
+    #[test]
+    fn one_channel_carries_three_kinds_without_phantom_losses() {
+        // Сквозная проверка сведения каналов в одно соединение
+        // (было три порта — находка 56). Через один транспорт идут
+        // видео, ввод и курсор вперемешку; дойти обязаны все, а
+        // счётчик потерь обязан остаться нулевым.
+        //
+        // Ноль здесь — не украшение отчёта: потеря видеокадра
+        // означает запрос ключевого (находка 52), и ложные потери
+        // на исправном канале дали бы шторм ключевых кадров.
+        let mut t = transport(LinkProfile::PERFECT);
+        let mut timings = FrameTimings::new(0);
+
+        const ROUNDS: usize = 20;
+        let kinds = [PayloadKind::Video, PayloadKind::Input, PayloadKind::Control];
+        for _ in 0..ROUNDS {
+            for kind in kinds {
+                t.send(kind, false, b"payload", &mut timings)
+                    .expect("отправка");
+            }
+        }
+
+        let mut delivered = [0usize; 3];
+        while let Some(frame) = t.receive(&mut timings).expect("приём") {
+            let index = kinds
+                .iter()
+                .position(|k| *k == frame.kind)
+                .expect("вид из числа отправленных");
+            delivered[index] += 1;
+        }
+
+        for (index, kind) in kinds.iter().enumerate() {
+            assert_eq!(
+                delivered[index], ROUNDS,
+                "вид {kind:?} дошёл не целиком: {} из {ROUNDS}",
+                delivered[index]
+            );
+        }
+        assert_eq!(
+            t.stats().frames_lost,
+            0,
+            "исправный канал не должен показывать потерь"
+        );
+    }
+
+    #[test]
+    fn each_kind_numbers_its_frames_from_zero() {
+        // Нумерация раздельная, поэтому первый кадр каждого вида
+        // получает номер 0. Общий счётчик выдал бы 0, 1, 2 — и у
+        // приёмника два вида из трёх начались бы с дыры.
+        let mut t = transport(LinkProfile::PERFECT);
+        let mut timings = FrameTimings::new(0);
+        for kind in [PayloadKind::Video, PayloadKind::Input, PayloadKind::Control] {
+            let first = t.send(kind, false, b"x", &mut timings).expect("отправка");
+            assert_eq!(first, 0, "первый кадр вида {kind:?} обязан быть нулевым");
+        }
     }
 
     #[test]

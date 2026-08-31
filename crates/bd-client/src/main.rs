@@ -183,27 +183,22 @@ mod run {
             };
         println!("Декодер: H.264 D3D11VA, выход NV12");
 
-        // Три соединения на трёх портах подряд — так же, как их
-        // открывает хост.
+        // ОДНО соединение на всё — так же, как его открывает хост.
         //
-        // Сборщик ведёт один `last_delivered` на поток и выбрасывает
-        // всё с меньшим номером. Видео идёт 60 кадрами в секунду,
-        // ввод — сотнями событий, нумерация у каждого своя: в одной
-        // очереди каждый вид считал бы чужие пакеты устаревшими.
+        // Раньше их было три, на трёх портах подряд (находка 56).
+        // Причина была в сборщике, а не в приоритетах, и она устранена
+        // разделением состояния сборки по `PayloadKind`; подробное
+        // обоснование — в `bd-host`.
         //
-        // Три порта — временное решение (см. bd-host): на этапе 4
-        // пробивать три порта через NAT дороже, чем один, и тогда это
-        // придётся свести к одному соединению с разделением по видам.
-        let input_server = SocketAddr::new(server.ip(), server.port() + 1);
-        let cursor_server = SocketAddr::new(server.ip(), server.port() + 2);
-
+        // Для клиента у этого есть отдельное следствие, которого нет
+        // у хоста: **ожидание теперь одно**. Раньше видео ждали на
+        // своём канале, а курсор опрашивали на другом; теперь всё
+        // приходит одной очередью, и разбор идёт по виду уже после
+        // пробуждения. Опрашивать два канала по очереди было бы
+        // нельзя — ожидание на одном задерживало бы другой.
         println!("Подключаюсь к {server}...");
-        let mut video = QuicTransport::connect(server, Duration::from_secs(15), epoch)?;
-        println!("Видео: соединение установлено.");
-        let mut input = QuicTransport::connect(input_server, Duration::from_secs(15), epoch)?;
-        println!("Ввод: подключён.");
-        let mut cursor = QuicTransport::connect(cursor_server, Duration::from_secs(15), epoch)?;
-        println!("Курсор: подключён.\n");
+        let mut session = QuicTransport::connect(server, Duration::from_secs(15), epoch)?;
+        println!("Соединение установлено (видео, ввод и курсор одним каналом).\n");
 
         let window_size = FrameSize::new(size.width / 2, size.height / 2);
         let mut window = VideoWindow::new(
@@ -332,7 +327,7 @@ mod run {
                     input_sequence += 1;
 
                     let mut timings = FrameTimings::default();
-                    if input
+                    if session
                         .send(PayloadKind::Input, false, &sequenced.encode(), &mut timings)
                         .is_ok()
                     {
@@ -341,23 +336,97 @@ mod run {
                 }
             }
 
-            // ── Курсор: хост → клиент ─────────────────────────────
+            // ── Приём: видео и курсор одной очередью ──────────────
             //
-            // Цикл, а не одна попытка: позиций приходит несколько за
-            // итерацию, и показывать надо последнюю — промежуточные
-            // уже устарели.
-            loop {
+            // Ожидание НА КАНАЛЕ, а не на такте цикла — здесь лечится
+            // находка 41. Поток паркуется до прихода чего угодно от
+            // хоста и просыпается ровно по нему; таймаут нужен лишь
+            // затем, чтобы перерисовать окно на статичном экране.
+            //
+            // # Почему один цикл, а не два
+            //
+            // Пока каналов было три, курсор опрашивался неблокирующим
+            // `receive`, а видео ждали отдельно. В сведённом канале так
+            // нельзя: очередь одна, и ожидание видео задержало бы
+            // курсор ровно на то же время.
+            //
+            // Поэтому цикл ждёт **любую** нагрузку и разбирает её по
+            // виду. Курсор применяется на месте и ожидание продолжается
+            // — он не кадр, показывать по нему нечего. Выход из цикла
+            // только на видеокадре или по таймауту.
+            //
+            // # Бюджет ожидания тратится только на пустую очередь
+            //
+            // Первая версия отсчитывала общий остаток `FRAME_WAIT` от
+            // начала итерации и ждала на каждом обороте цикла. Это
+            // выглядело правильным — «ждём кадр не дольше 16 мс», — но
+            // **срезало частоту вдвое**: 29.8 fps вместо 54.8.
+            //
+            // Причина в том, что курсорные пакеты идут сотнями в
+            // секунду. Каждый оборот уменьшал остаток, и на очередном
+            // курсоре бюджет обнулялся; следующий вызов с нулевым
+            // таймаутом возвращал «пусто» — хотя кадр в этот момент
+            // вполне мог лежать в очереди следующим. Клиент уходил
+            // перерисовывать старый кадр, а свежий забирал только на
+            // следующей итерации.
+            //
+            // Ошибка была тихой: ни отказа, ни потерь, ни роста
+            // задержки (медиана осталась 10.7 мс). Просто половина
+            // кадров показывалась позже, чем могла. Нашлась она
+            // сравнением с прежней версией, а не тестом — тесты
+            // проверяют доставку, а не то, насколько быстро её
+            // забирают.
+            //
+            // Отсюда правило цикла: **ждать только когда очередь
+            // действительно пуста**. Уже пришедшее разбирается без
+            // ожидания и бюджета не тратит.
+            let mut waited = false;
+            let (delivered, arrival) = 'wait: loop {
                 let mut arrival = FrameTimings::default();
-                let delivered = match cursor.receive(&mut arrival) {
-                    Ok(Some(d)) => d,
-                    Ok(None) => break,
-                    Err(_) => break,
+
+                // Сначала — всё, что уже пришло, без ожидания.
+                let ready = match session.receive(&mut arrival) {
+                    Ok(frame) => frame,
+                    Err(err) => {
+                        println!("\nСоединение потеряно: {err}");
+                        break 'session;
+                    }
                 };
 
-                match delivered.kind {
+                let received = match ready {
+                    Some(frame) => frame,
+                    None => {
+                        // Очередь пуста. Ждём — но только один раз за
+                        // итерацию: второе ожидание означало бы, что
+                        // мы ждём уже дольше кадра, а окно всё это
+                        // время не перерисовано.
+                        if waited {
+                            window.redraw_last_frame()?;
+                            continue 'session;
+                        }
+                        waited = true;
+
+                        match session.receive_timeout(FRAME_WAIT, &mut arrival) {
+                            Ok(Some(frame)) => frame,
+                            Ok(None) => {
+                                // Хост молчит. Окно обязано жить, иначе
+                                // Windows пометит его зависшим
+                                // (находка 37).
+                                window.redraw_last_frame()?;
+                                continue 'session;
+                            }
+                            Err(err) => {
+                                println!("\nСоединение потеряно: {err}");
+                                break 'session;
+                            }
+                        }
+                    }
+                };
+
+                match received.kind {
                     // Форма курсора: приходит редко и весит килобайты.
                     PayloadKind::Control => {
-                        if let Some(shape) = CursorShape::parse(&delivered.data) {
+                        if let Some(shape) = CursorShape::parse(&received.data) {
                             // Без курсора работать можно, без картинки
                             // нельзя: сессию из-за формы не рвём.
                             if window.set_cursor_shape(&shape).is_ok() {
@@ -368,32 +437,18 @@ mod run {
                     // Позиция: 9 байт, приходит сотни раз в секунду и
                     // обгоняет картинку — иначе стрелка тянулась бы
                     // за рукой человека.
-                    _ => {
-                        if let Some(position) = CursorPosition::parse(&delivered.data) {
+                    PayloadKind::Cursor => {
+                        if let Some(position) = CursorPosition::parse(&received.data) {
                             window.set_cursor_position(&position);
                         }
                     }
-                }
-            }
-
-            // ── Видео: ожидание НА КАНАЛЕ, а не на такте цикла ────
-            //
-            // Здесь и лечится находка 41. Поток паркуется до прихода
-            // кадра и просыпается ровно по нему; таймаут нужен лишь
-            // затем, чтобы перерисовать окно на статичном экране.
-            let mut arrival = FrameTimings::default();
-            let delivered = match video.receive_timeout(FRAME_WAIT, &mut arrival) {
-                Ok(Some(frame)) => frame,
-                Ok(None) => {
-                    // Кадра нет: хост ничего не прислал. Окно обязано
-                    // жить, иначе Windows пометит его зависшим
-                    // (находка 37).
-                    window.redraw_last_frame()?;
-                    continue;
-                }
-                Err(err) => {
-                    println!("\nСоединение потеряно: {err}");
-                    break 'session;
+                    // Кадр — единственное, ради чего цикл завершается:
+                    // дальше идёт декод и показ.
+                    PayloadKind::Video => break 'wait (received, arrival),
+                    // Вид, которого хост не шлёт. Молча пропускаем:
+                    // это может быть и мусор от постороннего, до
+                    // аутентификации отправитель не подтверждён (§8.5).
+                    _ => {}
                 }
             };
 
@@ -504,10 +559,10 @@ mod run {
                     }
                 }
 
-                let stats = video.stats();
+                let stats = session.stats();
                 overlay_lines.push(format!(
                     "RTT      {:>7.1} мс",
-                    video.rtt().as_secs_f64() * 1000.0
+                    session.rtt().as_secs_f64() * 1000.0
                 ));
                 // Потери кадров и датаграмов печатаются отдельно: они
                 // расходятся в разы, потому что потеря одного датаграма
@@ -537,7 +592,7 @@ mod run {
                 };
                 input_sequence += 1;
                 let mut timings = FrameTimings::default();
-                let _ = input.send(PayloadKind::Input, false, &sequenced.encode(), &mut timings);
+                let _ = session.send(PayloadKind::Input, false, &sequenced.encode(), &mut timings);
             }
             // Датаграмы уходят из своего потока: без паузы процесс
             // завершится раньше, чем поток QUIC успеет их отправить.
@@ -551,7 +606,7 @@ mod run {
             cursor_applied,
             &total_times,
             &stage_times,
-            &video,
+            &session,
             server.ip().is_loopback(),
         );
 
@@ -566,13 +621,13 @@ mod run {
         cursor_applied: u64,
         total_times: &LatencyWindow,
         stage_times: &BTreeMap<Stage, LatencyWindow>,
-        video: &QuicTransport,
+        session: &QuicTransport,
         // Хост на этом же компьютере: вердикт по критерию LAN тогда
         // выносить нельзя (см. ниже).
         local: bool,
     ) {
         let elapsed = now().duration_since(started);
-        let stats = video.stats();
+        let stats = session.stats();
 
         println!("\n=== Итоги сессии ===\n");
         println!("Длительность:     {:.1} с", elapsed.as_secs_f64());
@@ -588,7 +643,7 @@ mod run {
         );
         println!(
             "RTT:              {:.1} мс",
-            video.rtt().as_secs_f64() * 1000.0
+            session.rtt().as_secs_f64() * 1000.0
         );
 
         match (total_times.median(), total_times.p95()) {

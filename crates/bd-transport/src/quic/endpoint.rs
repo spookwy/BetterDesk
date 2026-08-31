@@ -91,11 +91,27 @@ pub struct QuicTransport {
     from_network: Receiver<ReassembledFrame>,
     stats: Arc<SharedStats>,
     epoch: Epoch,
-    /// Номер следующего кадра.
+    /// Номер следующего кадра — **свой у каждого вида нагрузки**.
     ///
     /// Ведётся здесь, а не в потоке сети: вызывающему номер нужен
     /// сразу, чтобы запомнить отправленный кадр.
-    next_sequence: u64,
+    ///
+    /// # Почему счётчик не один
+    ///
+    /// Пока каждый вид ехал своим соединением, общий счётчик был
+    /// незаметен — в соединении всё равно шёл один вид. В сведённом
+    /// соединении общий счётчик означал бы, что видео, ввод и курсор
+    /// делят одну нумерацию: у приёмника каждый вид видел бы
+    /// **дыры** на месте чужих номеров и считал бы их потерями.
+    ///
+    /// Для видео это не безобидно: потеря — сигнал запросить ключевой
+    /// кадр (§0.1, находка 52), и шторм ключевых кадров возник бы на
+    /// ровном месте, при полностью исправном канале.
+    ///
+    /// Вектор пар, а не массив по коду вида: видов четыре, поиск по
+    /// ним дешевле любой косвенности, а структура остаётся пустой,
+    /// пока ничего не отправлено.
+    next_sequence: Vec<(PayloadKind, u64)>,
     /// Держит поток живым. При уничтожении транспорта поток
     /// завершается, потому что каналы закрываются.
     _worker: WorkerHandle,
@@ -207,7 +223,7 @@ impl QuicTransport {
             from_network,
             stats,
             epoch,
-            next_sequence: 0,
+            next_sequence: Vec::new(),
             _worker: worker,
         })
     }
@@ -237,7 +253,15 @@ impl QuicTransport {
         let now = self.epoch.stamp_now();
         timings.mark(Stage::Sent, now);
 
-        let sequence = self.next_sequence;
+        // Счётчик вида заводится при первой отправке этого вида.
+        let counter = match self.next_sequence.iter().position(|(k, _)| *k == kind) {
+            Some(index) => index,
+            None => {
+                self.next_sequence.push((kind, 0));
+                self.next_sequence.len() - 1
+            }
+        };
+        let sequence = self.next_sequence[counter].1;
 
         let outgoing = Outgoing {
             kind,
@@ -257,7 +281,7 @@ impl QuicTransport {
                 // отброшенный кадр не должен занимать номер, иначе
                 // приёмник посчитает его потерянным и запросит
                 // ключевой кадр без повода.
-                self.next_sequence += 1;
+                self.next_sequence[counter].1 += 1;
                 Ok(sequence)
             }
             Err(TrySendError::Full(_)) => Err(TransportError::WouldBlock {

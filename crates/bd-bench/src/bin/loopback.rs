@@ -642,9 +642,15 @@ fn main() -> anyhow::Result<()> {
                     cursor_shapes_sent += 1;
                 }
 
+                // Вид `Cursor`, а не `Video`: у пробы курсор всё ещё
+                // едет своим экземпляром транспорта, и вид здесь ни на
+                // что не влияет. Но продукт свёл каналы в один, где вид
+                // стал адресом, — и расхождение между пробой и
+                // продуктом в том, что именно уходит в провод, рано или
+                // поздно стоило бы отладки на ровном месте.
                 let mut timings = bd_core::metrics::FrameTimings::default();
                 cursor_transport.send(
-                    PayloadKind::Video,
+                    PayloadKind::Cursor,
                     false,
                     &state.position.encode(),
                     &mut timings,

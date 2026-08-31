@@ -231,35 +231,36 @@ pub enum DropReason {
     Incomplete,
 }
 
-/// Сборщик кадров из фрагментов.
+/// Сборка кадров одного вида нагрузки.
 ///
-/// Держит несколько кадров одновременно: датаграмы приходят не по
-/// порядку, и хвост предыдущего кадра вполне может прийти после
-/// головы следующего.
+/// # Почему состояние раздельное, а не общее
+///
+/// Пока каждый вид ехал своим соединением на своём порту (находка 56),
+/// разделять было нечего: в очереди лежали только видеокадры, только
+/// события ввода или только позиции курсора.
+///
+/// В одном соединении это перестаёт быть верным. Нумерация у каждого
+/// вида своя и растёт со своей скоростью: видео идёт 60 кадрами в
+/// секунду, ввод — сотнями событий. Общий `last_delivered` означал бы,
+/// что вид с быстрой нумерацией объявляет пакеты медленного
+/// устаревшими — и молча их выбрасывает, потому что `TooOld` не
+/// ошибка, а норма при переупорядочивании.
+///
+/// Ошибка была бы **тихой**: ни отказа, ни искажённых байтов. Просто
+/// курсор перестал бы двигаться, а клавиатура — печатать, и искать
+/// причину пришлось бы в коде ввода, который исправен.
 #[derive(Debug)]
-pub struct Reassembler {
+struct KindState {
     pending: Vec<Pending>,
     capacity: usize,
-    /// Номер последнего выданного наверх кадра.
+    /// Номер последнего выданного наверх кадра этого вида.
     last_delivered: Option<u64>,
-    /// Сколько кадров выброшено неполными.
     lost_frames: u64,
-    /// Сколько фрагментов отброшено.
     dropped_fragments: u64,
 }
 
-impl Reassembler {
-    /// Сборщик, удерживающий `capacity` незавершённых кадров.
-    ///
-    /// Два-три кадра — разумный предел: держать больше значит
-    /// соглашаться показать кадр, устаревший на несколько кадров,
-    /// а это прямо противоречит цели по задержке.
-    ///
-    /// # Паника
-    ///
-    /// Если `capacity` равна нулю (ошибка конфигурации, §4.3.6).
-    pub fn new(capacity: usize) -> Self {
-        assert!(capacity > 0, "ёмкость сборщика должна быть положительной");
+impl KindState {
+    fn new(capacity: usize) -> Self {
         Self {
             pending: Vec::with_capacity(capacity),
             capacity,
@@ -269,26 +270,12 @@ impl Reassembler {
         }
     }
 
-    /// Число кадров, выброшенных неполными.
-    pub fn lost_frames(&self) -> u64 {
-        self.lost_frames
-    }
-
-    /// Число отброшенных фрагментов.
-    pub fn dropped_fragments(&self) -> u64 {
-        self.dropped_fragments
-    }
-
-    /// Принять датаграм.
+    /// Принять уже разобранный фрагмент.
     ///
-    /// # Ошибки
-    ///
-    /// [`TransportError::Malformed`] — датаграм не прошёл разбор. Это
-    /// не повод рвать сессию: мусор мог прийти от кого угодно, а
-    /// UDP-сокет не даёт гарантий отправителя до аутентификации (§8.5).
-    pub fn accept(&mut self, datagram: &[u8]) -> Result<ReceiveOutcome> {
-        let (header, payload) = FragmentHeader::parse(datagram)?;
-
+    /// Заголовок приходит разобранным, а не сырым датаграмом: вид
+    /// нагрузки нужно прочитать **до** выбора состояния, и разбирать
+    /// его дважды незачем.
+    fn accept(&mut self, header: FragmentHeader, payload: &[u8]) -> Result<ReceiveOutcome> {
         // Кадр, который мы уже показали или уже проехали. Инвариант
         // «номера растут» — наш собственный, так что сравнение честное.
         if let Some(last) = self.last_delivered {
@@ -398,6 +385,104 @@ impl Reassembler {
         });
         self.lost_frames += lost;
         self.dropped_fragments += fragments;
+    }
+}
+
+/// Сборщик кадров из фрагментов.
+///
+/// Держит несколько кадров одновременно: датаграмы приходят не по
+/// порядку, и хвост предыдущего кадра вполне может прийти после
+/// головы следующего.
+///
+/// # Виды нагрузки не смешиваются
+///
+/// Каждый [`PayloadKind`] собирается независимо: своя очередь
+/// незавершённых кадров, свой номер последнего выданного, своя
+/// ёмкость. Это то, что позволяет вести видео, ввод и курсор **по
+/// одному соединению** — без чего не пробить NAT одним портом (§5.4).
+///
+/// Счётчики потерь при этом общие: пайплайну и оверлею нужна одна
+/// цифра «сколько потеряно», а не три. Разбивка доступна отдельно
+/// через [`Reassembler::lost_frames_of`].
+#[derive(Debug)]
+pub struct Reassembler {
+    /// Состояния по видам, заводятся по мере появления.
+    ///
+    /// Вектор пар, а не `HashMap`: видов четыре, и линейный поиск по
+    /// четырём элементам дешевле хеширования. Заодно структура
+    /// остаётся без аллокации, пока не пришёл первый датаграм.
+    kinds: Vec<(PayloadKind, KindState)>,
+    capacity: usize,
+}
+
+impl Reassembler {
+    /// Сборщик, удерживающий `capacity` незавершённых кадров **на
+    /// каждый вид нагрузки**.
+    ///
+    /// Два-три кадра — разумный предел: держать больше значит
+    /// соглашаться показать кадр, устаревший на несколько кадров,
+    /// а это прямо противоречит цели по задержке.
+    ///
+    /// # Паника
+    ///
+    /// Если `capacity` равна нулю (ошибка конфигурации, §4.3.6).
+    pub fn new(capacity: usize) -> Self {
+        assert!(capacity > 0, "ёмкость сборщика должна быть положительной");
+        Self {
+            kinds: Vec::new(),
+            capacity,
+        }
+    }
+
+    /// Число кадров, выброшенных неполными — по всем видам.
+    pub fn lost_frames(&self) -> u64 {
+        self.kinds.iter().map(|(_, s)| s.lost_frames).sum()
+    }
+
+    /// Число отброшенных фрагментов — по всем видам.
+    pub fn dropped_fragments(&self) -> u64 {
+        self.kinds.iter().map(|(_, s)| s.dropped_fragments).sum()
+    }
+
+    /// Число кадров, выброшенных неполными у одного вида.
+    ///
+    /// Нужно там, где потери видео и потери ввода означают разное:
+    /// потерянный кадр — это артефакт на доли секунды, потерянное
+    /// отпускание клавиши — залипание навсегда (§0.1, этап 2).
+    pub fn lost_frames_of(&self, kind: PayloadKind) -> u64 {
+        self.state_of(kind).map_or(0, |s| s.lost_frames)
+    }
+
+    fn state_of(&self, kind: PayloadKind) -> Option<&KindState> {
+        self.kinds.iter().find(|(k, _)| *k == kind).map(|(_, s)| s)
+    }
+
+    /// Принять датаграм.
+    ///
+    /// # Ошибки
+    ///
+    /// [`TransportError::Malformed`] — датаграм не прошёл разбор. Это
+    /// не повод рвать сессию: мусор мог прийти от кого угодно, а
+    /// UDP-сокет не даёт гарантий отправителя до аутентификации (§8.5).
+    pub fn accept(&mut self, datagram: &[u8]) -> Result<ReceiveOutcome> {
+        let (header, payload) = FragmentHeader::parse(datagram)?;
+
+        // Состояние вида заводится по первому пришедшему датаграму.
+        //
+        // Заводить все четыре заранее было бы проще, но неверно:
+        // тогда `lost_frames_of` для вида, которого в сессии нет
+        // вовсе, отвечал бы нулём наравне с видом, который идёт без
+        // потерь. Различать «не было» и «было и дошло» полезно.
+        let index = match self.kinds.iter().position(|(k, _)| *k == header.kind) {
+            Some(index) => index,
+            None => {
+                self.kinds
+                    .push((header.kind, KindState::new(self.capacity)));
+                self.kinds.len() - 1
+            }
+        };
+
+        self.kinds[index].1.accept(header, payload)
     }
 }
 
@@ -637,5 +722,163 @@ mod tests {
             }
             other => panic!("ожидался кадр, получено {other:?}"),
         }
+    }
+
+    /// Нарезать кадр заданного вида — для проверок смешения потоков.
+    fn split_kind(f: &Fragmenter, kind: PayloadKind, seq: u64, data: &[u8]) -> Vec<Vec<u8>> {
+        let mut out = Vec::new();
+        f.fragment(kind, seq, false, 0, data, |d| {
+            out.push(d.to_vec());
+            Ok(())
+        })
+        .expect("нарезка");
+        out
+    }
+
+    #[test]
+    fn fast_stream_does_not_starve_a_slow_one() {
+        // Тот самый дефект, ради которого состояние разделено
+        // (находка 56). Видео уходит далеко вперёд по нумерации, и
+        // при общем `last_delivered` следующее событие ввода было бы
+        // объявлено устаревшим и молча выброшено.
+        //
+        // «Молча» здесь ключевое: `TooOld` — не ошибка, а норма при
+        // переупорядочивании, поэтому в логе не появилось бы ничего.
+        let f = Fragmenter::with_max_payload(100);
+        let mut r = Reassembler::new(3);
+
+        // Видео разгоняется до сотого кадра.
+        for seq in 1..=100u64 {
+            for d in &split_kind(&f, PayloadKind::Video, seq, b"video") {
+                let _ = r.accept(d).expect("приём видео");
+            }
+        }
+
+        // Ввод только начинается — его первый пакет с номером 1.
+        let input = split_kind(&f, PayloadKind::Input, 1, b"key");
+        match r.accept(&input[0]).expect("приём ввода") {
+            ReceiveOutcome::Frame(frame) => {
+                assert_eq!(frame.kind, PayloadKind::Input);
+                assert_eq!(frame.data, b"key");
+            }
+            other => {
+                panic!("событие ввода обязано пройти при любом номере видео, получено {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn kinds_reassemble_independently_when_interleaved() {
+        // Фрагменты трёх видов перемешаны в одной очереди — ровно то,
+        // что происходит в одном QUIC-соединении. Каждый вид обязан
+        // собраться целиком и не подобрать чужие байты.
+        let f = Fragmenter::with_max_payload(4);
+        let video: Vec<u8> = (0..14u8).collect();
+        let input: Vec<u8> = (100..109u8).collect();
+        let cursor: Vec<u8> = (200..206u8).collect();
+
+        let mut mixed = Vec::new();
+        let streams = [
+            split_kind(&f, PayloadKind::Video, 5, &video),
+            split_kind(&f, PayloadKind::Input, 5, &input),
+            split_kind(&f, PayloadKind::Control, 5, &cursor),
+        ];
+        // Чередование по одному фрагменту из каждого потока.
+        let longest = streams.iter().map(Vec::len).max().expect("потоки есть");
+        for i in 0..longest {
+            for s in &streams {
+                if let Some(d) = s.get(i) {
+                    mixed.push(d.clone());
+                }
+            }
+        }
+
+        let mut r = Reassembler::new(3);
+        let mut got: Vec<(PayloadKind, Vec<u8>)> = Vec::new();
+        for d in &mixed {
+            if let ReceiveOutcome::Frame(frame) = r.accept(d).expect("приём") {
+                got.push((frame.kind, frame.data));
+            }
+        }
+
+        assert_eq!(got.len(), 3, "каждый вид обязан собраться");
+        for (kind, expected) in [
+            (PayloadKind::Video, &video),
+            (PayloadKind::Input, &input),
+            (PayloadKind::Control, &cursor),
+        ] {
+            let actual = got
+                .iter()
+                .find(|(k, _)| *k == kind)
+                .map(|(_, d)| d)
+                .unwrap_or_else(|| panic!("вид {kind:?} не собран"));
+            assert_eq!(actual, expected, "байты вида {kind:?} перепутаны");
+        }
+    }
+
+    #[test]
+    fn same_sequence_in_different_kinds_is_not_a_duplicate() {
+        // Нумерация у каждого вида своя и начинается с нуля, поэтому
+        // совпадение номеров — норма, а не повтор. Общее состояние
+        // сочло бы второй пакет дубликатом и выбросило.
+        let f = Fragmenter::with_max_payload(100);
+        let mut r = Reassembler::new(3);
+
+        let video = split_kind(&f, PayloadKind::Video, 0, b"V");
+        let input = split_kind(&f, PayloadKind::Input, 0, b"I");
+
+        match r.accept(&video[0]).expect("приём") {
+            ReceiveOutcome::Frame(frame) => assert_eq!(frame.data, b"V"),
+            other => panic!("ожидался кадр, получено {other:?}"),
+        }
+        match r.accept(&input[0]).expect("приём") {
+            ReceiveOutcome::Frame(frame) => assert_eq!(frame.data, b"I"),
+            other => panic!("тот же номер у другого вида — не дубликат, получено {other:?}"),
+        }
+    }
+
+    #[test]
+    fn losses_are_counted_per_kind_and_in_total() {
+        // Потеря кадра видео не должна выглядеть как потеря ввода:
+        // артефакт на доли секунды и залипшая клавиша лечатся
+        // по-разному, и одна цифра на двоих скрыла бы, что именно
+        // теряется.
+        let f = Fragmenter::with_max_payload(10);
+        let mut r = Reassembler::new(2);
+
+        // Видео: три кадра подряд неполными — вытесняются.
+        for seq in 1..=3u64 {
+            let d = split_kind(&f, PayloadKind::Video, seq, &[0u8; 35]);
+            let _ = r.accept(&d[0]).expect("приём");
+        }
+        // Ввод идёт целиком.
+        for seq in 1..=2u64 {
+            for d in &split_kind(&f, PayloadKind::Input, seq, b"ok") {
+                let _ = r.accept(d).expect("приём");
+            }
+        }
+
+        assert_eq!(
+            r.lost_frames_of(PayloadKind::Video),
+            1,
+            "видео потеряло кадр"
+        );
+        assert_eq!(
+            r.lost_frames_of(PayloadKind::Input),
+            0,
+            "ввод прошёл без потерь"
+        );
+        assert_eq!(r.lost_frames(), 1, "итог сходится с разбивкой");
+    }
+
+    #[test]
+    fn unseen_kind_reports_no_losses() {
+        // «Вида не было» и «вид шёл без потерь» дают одинаковый ноль,
+        // и это осознанно: различать их важно при чтении отчёта, а не
+        // в коде. Проверка фиксирует, что обращение к незаведённому
+        // виду не паникует и не заводит состояние на пустом месте.
+        let r = Reassembler::new(2);
+        assert_eq!(r.lost_frames_of(PayloadKind::Audio), 0);
+        assert_eq!(r.lost_frames(), 0);
     }
 }

@@ -183,34 +183,31 @@ mod run {
             println!("Предел частоты снят (--fps 0)");
         }
 
-        // Три соединения на трёх ПОРТАХ подряд: видео, ввод, курсор.
+        // ОДНО соединение на всё: видео, ввод, курсор.
         //
-        // # Почему не одно соединение на всё
+        // # Что здесь было раньше и почему изменилось
         //
-        // Сборщик ведёт **один** `last_delivered` на поток и выбрасывает
-        // всё, что пришло с меньшим номером. Видео идёт 60 кадрами в
-        // секунду, ввод — сотнями событий, и нумерация у них своя:
-        // в одной очереди каждый вид считал бы чужие пакеты
-        // устаревшими и выбрасывал их.
+        // До этапа 4 каналов было три, на трёх портах подряд (находка
+        // 56). Причина была не в приоритетах, а в сборщике: он вёл
+        // один номер последнего выданного кадра на весь поток, и виды
+        // с разной скоростью нумерации выбрасывали пакеты друг друга
+        // как устаревшие. Разнести их по портам было дешевле, чем
+        // трогать отлаженный `Reassembler`.
         //
-        // Разделение по видам (`PayloadKind`) в одном соединении
-        // потребовало бы отдельного состояния сборки на каждый вид.
-        // Это правильная конструкция, но она меняет `Reassembler`, а
-        // тот отлажен на потерях и трогать его ради этапа 3 незачем —
-        // здесь нужна работающая проверка между двумя машинами.
+        // На этапе 4 цена поменялась местами. Пробивание NAT требует
+        // бить с того же порта, на котором пойдут данные, — то есть
+        // три порта означают втрое больше пробивания и втрое больше
+        // способов не пробиться. Поэтому состояние сборки разделено
+        // по `PayloadKind` внутри одного соединения, а портов снова
+        // один.
         //
-        // Три порта — временное решение, и записано как временное:
-        // на этапе 4 (ICE, hole punching) пробивать три порта вместо
-        // одного будет ощутимо дороже, и тогда это придётся свести
-        // к одному соединению.
-        let input_bind = SocketAddr::new(bind.ip(), bind.port() + 1);
-        let cursor_bind = SocketAddr::new(bind.ip(), bind.port() + 2);
-
+        // Побочная выгода видна человеку, а не коду: в файрволе
+        // открывается один порт вместо трёх, и исчезает симптом
+        // «видео идёт, а мышь и клавиатура нет», который без
+        // подсказки диагностируется долго.
         println!(
-            "\nСлушаю {}, {}, {} (видео, ввод, курсор).",
-            bind.port(),
-            input_bind.port(),
-            cursor_bind.port()
+            "\nСлушаю {} (видео, ввод и курсор одним каналом).",
+            bind.port()
         );
         // Объявиться на сигналинге, если он задан.
         //
@@ -276,12 +273,8 @@ mod run {
 
         println!("Жду клиента ({} с)...", ACCEPT_TIMEOUT.as_secs());
 
-        let mut video = QuicTransport::host(bind, ACCEPT_TIMEOUT, epoch)?;
-        println!("Видео: клиент подключился.");
-        let mut input = QuicTransport::host(input_bind, ACCEPT_TIMEOUT, epoch)?;
-        println!("Ввод: подключён.");
-        let mut cursor = QuicTransport::host(cursor_bind, ACCEPT_TIMEOUT, epoch)?;
-        println!("Курсор: подключён.\n");
+        let mut session = QuicTransport::host(bind, ACCEPT_TIMEOUT, epoch)?;
+        println!("Клиент подключился.\n");
 
         // Инжект ввода по умолчанию ВЫКЛЮЧЕН.
         //
@@ -326,7 +319,7 @@ mod run {
         println!("Отдаю экран. Ctrl+C — завершить.\n");
 
         'session: loop {
-            if !video.is_connected() {
+            if !session.is_connected() {
                 println!("Клиент отключился.");
                 break;
             }
@@ -342,7 +335,7 @@ mod run {
             // итерацию, и копить их значит копить задержку отклика.
             loop {
                 let mut arrival = FrameTimings::default();
-                let delivered = match input.receive(&mut arrival) {
+                let delivered = match session.receive(&mut arrival) {
                     Ok(Some(d)) => d,
                     Ok(None) => break,
                     Err(_) => break,
@@ -388,7 +381,7 @@ mod run {
                 // не сможет.
                 if let Some(shape) = state.new_shape {
                     let mut timings = FrameTimings::default();
-                    if cursor
+                    if session
                         .send(PayloadKind::Control, false, &shape.encode(), &mut timings)
                         .is_ok()
                     {
@@ -396,10 +389,18 @@ mod run {
                     }
                 }
 
+                // Позиция идёт видом `Cursor`, а не `Video`.
+                //
+                // Пока курсор ехал своим соединением, вид не значил
+                // ничего — в том канале не было ничего другого. В
+                // сведённом канале вид стал адресом: под кодом
+                // `Video` позиция попала бы в сборку видеокадров, где
+                // своя нумерация, и оба потока молча выбрасывали бы
+                // друг друга как устаревшие.
                 let mut timings = FrameTimings::default();
-                if cursor
+                if session
                     .send(
-                        PayloadKind::Video,
+                        PayloadKind::Cursor,
                         false,
                         &state.position.encode(),
                         &mut timings,
@@ -467,7 +468,7 @@ mod run {
                 keyframes += 1;
             }
 
-            match video.send(
+            match session.send(
                 PayloadKind::Video,
                 keyframe,
                 &encoded.data,
@@ -514,7 +515,7 @@ mod run {
             cursor_updates,
             cursor_shapes,
             recoveries,
-            &video,
+            &session,
         );
 
         Ok(())
@@ -579,10 +580,10 @@ mod run {
         cursor_updates: u64,
         cursor_shapes: u64,
         recoveries: u64,
-        video: &QuicTransport,
+        session: &QuicTransport,
     ) {
         let elapsed = now().duration_since(started);
-        let stats = video.stats();
+        let stats = session.stats();
         let secs = elapsed.as_secs_f64().max(0.001);
 
         println!("\n=== Итоги сессии ===\n");
@@ -608,7 +609,7 @@ mod run {
         println!("Восстановлений:   {recoveries}");
         println!(
             "RTT:              {:.1} мс",
-            video.rtt().as_secs_f64() * 1000.0
+            session.rtt().as_secs_f64() * 1000.0
         );
 
         // Отброшенные датаграмы означают, что очередь отправки
