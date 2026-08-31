@@ -56,7 +56,7 @@ mod run {
     use bd_core::time::{now, Epoch, Timestamp};
     use bd_input::InputTracker;
     use bd_render::windows::VideoWindow;
-    use bd_transport::{PayloadKind, QuicTransport};
+    use bd_transport::{PayloadKind, QuicTransport, SignalEvent, Signaling};
     use std::collections::BTreeMap;
     use std::net::SocketAddr;
     use std::time::Duration;
@@ -87,20 +87,59 @@ mod run {
             )
             .init();
 
-        let server = match parse_connect() {
-            Some(addr) => addr,
-            None => {
-                println!("BetterDesk — клиент\n");
-                println!("Запуск:");
-                println!("  cargo run --release -p bd-client -- --connect АДРЕС:ПОРТ\n");
-                println!("Пример: --connect 192.168.1.5:7000");
+        println!("=== BetterDesk — клиент ===\n");
+
+        // Два способа сказать, куда подключаться.
+        //
+        // `--connect АДРЕС` — прямой, работает без всякого сервера и
+        // потому остаётся: в локальной сети адрес известен, и
+        // требовать там сигналинг значило бы сделать продукт
+        // неработоспособным при недоступном сервере.
+        //
+        // `--id ЦИФРЫ` — то, ради чего этап 4 и делается: человек
+        // вводит девять цифр, адрес выясняется сам.
+        let server = match (parse_connect(), parse_id(), parse_arg("--signaling")) {
+            // Прямой адрес имеет приоритет: он задан явнее.
+            (Some(addr), _, _) => addr,
+
+            (None, Some(id), Some(signaling_url)) => {
+                match resolve_by_id(id, &signaling_url) {
+                    Ok(addr) => addr,
+                    Err(e) => {
+                        // Честное сообщение вместо зависания — прямое
+                        // требование этапа 4.
+                        //
+                        // Печатаем причину сами, а наверх отдаём
+                        // короткое `Err`: ненулевой код возврата
+                        // нужен (по нему судят о прогоне в инструкции
+                        // для второй машины), но `anyhow` напечатал бы
+                        // полный текст вторым разом с префиксом
+                        // `Error:`. Один и тот же абзац дважды
+                        // выглядит сбоем программы, а не объяснением.
+                        println!("❌ {e}");
+                        anyhow::bail!("не удалось найти хост по ID");
+                    }
+                }
+            }
+
+            (None, Some(_), None) => {
+                println!("❌ Для подключения по ID нужен адрес сигналинга.");
+                println!("   Добавьте --signaling ws://АДРЕС:9000/ws");
+                return Ok(());
+            }
+
+            (None, None, _) => {
+                println!("Запуск — одним из двух способов:\n");
+                println!("  По ID (нужен сервер связи):");
+                println!("    --id 418207356 --signaling ws://АДРЕС:9000/ws\n");
+                println!("  Напрямую по адресу (в локальной сети):");
+                println!("    --connect 192.168.1.5:7000\n");
                 println!("На хосте при этом:");
                 println!("  cargo run --release -p bd-host -- --listen 0.0.0.0:7000");
+                println!("  (и то же --signaling, если подключаются по ID)");
                 return Ok(());
             }
         };
-
-        println!("=== BetterDesk — клиент ===\n");
 
         // Одна эпоха на весь пайплайн: иначе отметки стадий несравнимы
         // между собой (CLAUDE.md §4.5).
@@ -614,9 +653,85 @@ mod run {
         }
     }
 
+    /// Узнать адрес хоста по его девятизначному ID.
+    ///
+    /// # Почему ошибки здесь такие подробные
+    ///
+    /// Это единственное место продукта, где человек может ошибиться
+    /// молча: опечататься в ID, обратиться к выключенной машине,
+    /// указать не тот сервер. Все три случая выглядят одинаково —
+    /// «не подключается», — и без внятного различения человек будет
+    /// винить программу.
+    ///
+    /// Критерий этапа 4 требует ровно этого: «отказ соединения даёт
+    /// понятное сообщение, а не зависание».
+    fn resolve_by_id(
+        id: bd_core::device::DeviceId,
+        signaling_url: &str,
+    ) -> anyhow::Result<SocketAddr> {
+        println!("Ищу {id} через {signaling_url}...");
+
+        let signaling = Signaling::connect(signaling_url, Duration::from_secs(10))
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+        // Свой адрес хосту нужен, чтобы бить встречно при пробивании
+        // NAT. Порт 0 — «любой свободный»: настоящий выберет ОС при
+        // соединении, и сейчас это значение лишь заполняет поле.
+        //
+        // Оговорка, важная для этапа с ICE: пробивание NAT требует,
+        // чтобы это был ТОТ ЖЕ порт, с которого пойдёт QUIC. Сейчас
+        // это не так, и потому hole punching здесь ещё не работает —
+        // в одной сети он и не нужен, а через интернет потребует
+        // связать сокет сигналинга с сокетом транспорта.
+        let own = "0.0.0.0:0".parse().expect("константа");
+        signaling
+            .connect_to(id, own)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+        // Ждём ответа. 15 секунд с запасом: сервер отвечает мгновенно,
+        // и всё, что дольше, означает потерю связи с ним.
+        match signaling.wait(Duration::from_secs(15)) {
+            Ok(Some(SignalEvent::PeerFound { addr, .. })) => {
+                println!("Найден: {addr}");
+                addr.parse().map_err(|_| {
+                    // Сервер недоверен (§8.1): он может прислать
+                    // что угодно, и до этапа 5 заметить подмену
+                    // нечем. Мусор здесь — не наша ошибка, но и
+                    // молча его глотать нельзя.
+                    anyhow::anyhow!("сигналинг прислал непонятный адрес: {addr}")
+                })
+            }
+            Ok(Some(SignalEvent::Failed { reason })) => {
+                anyhow::bail!(
+                    "{reason}\n   \
+                     Проверьте: тот ли ID, запущен ли хост, \
+                     и указан ли у него тот же --signaling"
+                )
+            }
+            Ok(Some(other)) => {
+                anyhow::bail!("неожиданный ответ сигналинга: {other:?}")
+            }
+            Ok(None) => {
+                anyhow::bail!(
+                    "сигналинг не ответил за 15 с.\n   \
+                     Сервер запущен, но молчит — возможно, перегружен"
+                )
+            }
+            Err(e) => anyhow::bail!("связь с сигналингом потеряна: {e}"),
+        }
+    }
+
     /// Разобрать `--connect АДРЕС:ПОРТ`.
     fn parse_connect() -> Option<SocketAddr> {
         parse_arg("--connect").and_then(|v| v.parse().ok())
+    }
+
+    /// Разобрать `--id 418207356`.
+    ///
+    /// Принимает то, что человек копирует из переписки: с пробелами,
+    /// дефисами, точками.
+    fn parse_id() -> Option<bd_core::device::DeviceId> {
+        parse_arg("--id").and_then(|v| bd_core::device::DeviceId::parse(&v))
     }
 
     /// Разобрать `--seconds N` — ограничение прогона по времени.

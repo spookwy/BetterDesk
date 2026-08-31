@@ -45,13 +45,14 @@ mod run {
     use bd_capture::windows::{enumerate_monitors, DxgiCapturer};
     use bd_capture::{CaptureOutcome, Capturer};
     use bd_codec::{EncoderConfig, FrameKind};
+    use bd_core::device::DeviceId;
     use bd_core::input::SequencedInput;
     use bd_core::metrics::FrameTimings;
     use bd_core::pacing::FrameLimiter;
     use bd_core::time::{now, Epoch};
     use bd_input::windows::InputInjector;
     use bd_input::InputTracker;
-    use bd_transport::{PayloadKind, QuicTransport};
+    use bd_transport::{PayloadKind, QuicTransport, SignalEvent, Signaling};
     use std::net::SocketAddr;
     use std::time::Duration;
 
@@ -211,6 +212,68 @@ mod run {
             input_bind.port(),
             cursor_bind.port()
         );
+        // Объявиться на сигналинге, если он задан.
+        //
+        // # Почему это до приёма клиента, но не обязательно
+        //
+        // Регистрация должна произойти раньше, чем хост залипнет в
+        // ожидании клиента: `QuicTransport::host` блокируется, и
+        // после него мы бы уже ничего не успели объявить.
+        //
+        // При этом сигналинг **не обязателен**: в локальной сети
+        // адрес известен и без него, а требовать сервер там, где он
+        // не нужен, значило бы сделать продукт неработоспособным при
+        // недоступном сервере (§5.4 — LAN обязан работать сам).
+        //
+        // `Signaling` держится в переменной до конца функции: его
+        // `Drop` закрывает соединение, и хост исчез бы из реестра
+        // ровно в тот момент, когда стал доступен.
+        let _signaling = match parse_arg("--signaling") {
+            Some(url) => {
+                let id = device_id();
+                println!("Регистрируюсь на сигналинге {url}...");
+
+                match Signaling::connect(&url, Duration::from_secs(10)) {
+                    Ok(sig) => {
+                        sig.register(id, bind)?;
+
+                        // Ждём подтверждения: без него неизвестно,
+                        // принял ли сервер регистрацию, и человек
+                        // диктовал бы ID, по которому его не найти.
+                        match sig.wait(Duration::from_secs(5)) {
+                            Ok(Some(SignalEvent::Registered { public_addr, .. })) => {
+                                println!("\n╭──────────────────────────────╮");
+                                println!("│  ID этого компьютера         │");
+                                println!("│                              │");
+                                println!("│        {id}        │");
+                                println!("╰──────────────────────────────╯");
+                                println!("Внешний адрес: {public_addr}");
+                                println!("Продиктуйте ID тому, кто подключается.\n");
+                            }
+                            Ok(Some(SignalEvent::Failed { reason })) => {
+                                println!("❌ Сигналинг отказал: {reason}");
+                                println!("   Подключение по ID работать не будет.");
+                                println!("   Прямое подключение по адресу — будет.\n");
+                            }
+                            Ok(_) | Err(_) => {
+                                println!("⚠  Сигналинг не подтвердил регистрацию.");
+                                println!("   Подключение по ID может не работать.\n");
+                            }
+                        }
+                        Some(sig)
+                    }
+                    Err(e) => {
+                        // Недоступный сигналинг — не повод не работать:
+                        // в локальной сети он не нужен вовсе.
+                        println!("⚠  {e}");
+                        println!("   Работаю без него: подключение по адресу.\n");
+                        None
+                    }
+                }
+            }
+            None => None,
+        };
+
         println!("Жду клиента ({} с)...", ACCEPT_TIMEOUT.as_secs());
 
         let mut video = QuicTransport::host(bind, ACCEPT_TIMEOUT, epoch)?;
@@ -586,6 +649,21 @@ mod run {
             }
         }
         None
+    }
+
+    /// ID этой машины.
+    ///
+    /// Выводится локально из имени машины и пользователя: устойчив
+    /// между запусками, но никем не подтверждён. Настоящий ID выдаёт
+    /// сигналинг при регистрации (§5.4) — это придёт вместе с
+    /// аккаунтами, пока же сервер принимает тот, что мы назвали.
+    fn device_id() -> DeviceId {
+        let seed = format!(
+            "{}{1}{}",
+            std::env::var("COMPUTERNAME").unwrap_or_default(),
+            std::env::var("USERNAME").unwrap_or_default(),
+        );
+        DeviceId::derive(&seed)
     }
 
     fn parse_flag(name: &str) -> bool {

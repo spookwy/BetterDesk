@@ -28,6 +28,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod discovery;
 pub mod error;
 pub mod fragment;
 pub mod jitter;
@@ -35,6 +36,7 @@ pub mod loopback;
 pub mod packet;
 pub mod quic;
 
+pub use discovery::{SignalEvent, Signaling};
 pub use error::{Result, TransportError};
 pub use fragment::{
     DropReason, Fragmenter, ReassembledFrame, Reassembler, ReceiveOutcome, DEFAULT_MAX_PAYLOAD,

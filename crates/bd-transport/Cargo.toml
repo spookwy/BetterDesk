@@ -12,5 +12,7 @@ quinn.workspace = true
 rustls.workspace = true
 rcgen.workspace = true
 tokio.workspace = true
+tokio-tungstenite.workspace = true
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 thiserror.workspace = true
 tracing.workspace = true
