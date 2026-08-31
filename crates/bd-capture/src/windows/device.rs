@@ -89,6 +89,77 @@ impl D3dDevice {
         ))
     }
 
+    /// Создать устройство на адаптере по умолчанию, без привязки
+    /// к монитору и без дупликации.
+    ///
+    /// # Зачем отдельно от `for_monitor`
+    ///
+    /// Клиенту захват не нужен: он принимает чужой экран, декодирует
+    /// и показывает (CLAUDE.md §3.1). Но декодер и окно вывода живут
+    /// на D3D11-устройстве, а единственный способ его получить до сих
+    /// пор шёл через `DxgiCapturer`, то есть через дупликацию
+    /// **своего** монитора.
+    ///
+    /// Следствие практическое, а не эстетическое: клиент не мог
+    /// запуститься там, где дупликация недоступна, — например на
+    /// гибридной графике (§5.1), — хотя дуплицировать ему нечего.
+    /// Роль объявлена в §3.1, но порядок инициализации ей
+    /// противоречил: тот же класс ошибки, что находка 47, где клиент
+    /// требовал энкодера, чтобы ничего не кодировать.
+    ///
+    /// Адаптер берётся первый: у клиента нет монитора, чей адаптер
+    /// надо было бы угадывать, а декодер и swapchain работают на любом.
+    pub fn for_decode() -> Result<Self> {
+        // SAFETY: CreateDXGIFactory1 не принимает входных указателей;
+        // тип фабрики задан параметром типа и корректен.
+        let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }
+            .map_err(|e| CaptureError::DeviceInit(format!("CreateDXGIFactory1: {e}")))?;
+
+        // SAFETY: `factory` жив. Адаптер 0 есть на любой машине с
+        // работающим DXGI; его отсутствие означает отсутствие GPU.
+        let adapter: IDXGIAdapter1 = unsafe { factory.EnumAdapters1(0) }
+            .map_err(|e| CaptureError::DeviceInit(format!("адаптеров не найдено: {e}")))?;
+
+        let mut device: Option<ID3D11Device> = None;
+        let mut context: Option<ID3D11DeviceContext> = None;
+        let mut feature_level = D3D_FEATURE_LEVEL::default();
+
+        let levels = [D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0];
+
+        // SAFETY: тот же контракт, что в `for_monitor` — адаптер жив и
+        // указан явно, поэтому тип драйвера обязан быть UNKNOWN.
+        // BGRA_SUPPORT нужен Direct2D: на нём рисуются оверлей и курсор.
+        unsafe {
+            D3D11CreateDevice(
+                &adapter,
+                D3D_DRIVER_TYPE_UNKNOWN,
+                HMODULE::default(),
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                Some(&levels),
+                D3D11_SDK_VERSION,
+                Some(&mut device),
+                Some(&mut feature_level),
+                Some(&mut context),
+            )
+        }
+        .map_err(|e| CaptureError::DeviceInit(format!("D3D11CreateDevice: {e}")))?;
+
+        let device = device.ok_or_else(|| {
+            CaptureError::DeviceInit("D3D11CreateDevice вернул пустое устройство".into())
+        })?;
+        let context = context.ok_or_else(|| {
+            CaptureError::DeviceInit("D3D11CreateDevice вернул пустой контекст".into())
+        })?;
+
+        tracing::debug!(?feature_level, "D3D11-устройство для декода создано");
+
+        Ok(Self {
+            device,
+            context,
+            adapter,
+        })
+    }
+
     /// Ссылка на устройство.
     pub fn device(&self) -> &ID3D11Device {
         &self.device

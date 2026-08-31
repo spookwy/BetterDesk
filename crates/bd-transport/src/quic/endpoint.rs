@@ -7,7 +7,7 @@ use crate::packet::PayloadKind;
 use crate::{Result, TransportError};
 use bd_core::metrics::{FrameTimings, Stage};
 use bd_core::time::Epoch;
-use crossbeam_channel::{Receiver, Sender, TryRecvError, TrySendError};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError, TrySendError};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -289,6 +289,55 @@ impl QuicTransport {
                 }
             }
             Err(TryRecvError::Disconnected) => Err(TransportError::ThreadGone),
+        }
+    }
+
+    /// Дождаться кадра, но не дольше `timeout`.
+    ///
+    /// # Зачем нужен, если есть `receive`
+    ///
+    /// `receive` не блокирует, и вызывающий обязан сам решить, чем
+    /// занять время до следующего кадра. У пробы `loopback` этим
+    /// занятием оказался **захват собственного экрана**: цикл общий
+    /// на обе роли, и приёмник ждал `AcquireNextFrame` с таймаутом
+    /// 16 мс, хотя захватывать ему нечего.
+    ///
+    /// Цена этого измерена (находка 41): около 20 мс из 21 сидели в
+    /// стадии `network` на localhost, где сети фактически нет. Кадр
+    /// приходил в канал вовремя, но забирали его на следующем такте
+    /// чужого цикла.
+    ///
+    /// Попытка снять таймаут захвата сделала **хуже** (33.5 мс):
+    /// цикл без ожидания вытесняет поток QUIC, которому и надо
+    /// доставить датаграмы. То есть лечится это не таймаутом захвата,
+    /// а ожиданием **на том канале, откуда кадры приходят**, — что
+    /// и делает этот метод.
+    ///
+    /// Ожидание отдаёт процессор: `recv_timeout` паркует поток, а не
+    /// крутит опрос. Для клиента, которому больше нечего делать,
+    /// это правильный способ ждать.
+    ///
+    /// `Ok(None)` — таймаут истёк, кадра нет. Это не ошибка: на
+    /// статичном экране хост честно ничего не шлёт, а окно всё равно
+    /// обязано жить (находка 37).
+    pub fn receive_timeout(
+        &mut self,
+        timeout: Duration,
+        timings: &mut FrameTimings,
+    ) -> Result<Option<ReassembledFrame>> {
+        match self.from_network.recv_timeout(timeout) {
+            Ok(frame) => {
+                timings.mark(Stage::Received, self.epoch.stamp_now());
+                Ok(Some(frame))
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                if self.stats.connected.load(Ordering::Relaxed) {
+                    Ok(None)
+                } else {
+                    Err(TransportError::Disconnected)
+                }
+            }
+            Err(RecvTimeoutError::Disconnected) => Err(TransportError::ThreadGone),
         }
     }
 
@@ -651,6 +700,58 @@ mod tests {
         assert!(
             matches!(rx.try_recv(), Err(TryRecvError::Disconnected)),
             "закрытый канал обязан отличаться от пустого"
+        );
+    }
+
+    #[test]
+    fn waiting_returns_as_soon_as_a_frame_arrives() {
+        // Свойство, ради которого существует `receive_timeout`: ждать
+        // надо НА КАНАЛЕ, и просыпаться по приходу кадра, а не по
+        // истечении таймаута.
+        //
+        // Без этого клиент забирал кадр на следующем такте своего
+        // цикла, и на localhost это давало ~20 мс из 21 в стадии
+        // `network` — там, где сети фактически нет (находка 41).
+        //
+        // Проверяется поведение канала, а не обёртки: `receive_timeout`
+        // тонкая, а поднимать настоящее QUIC-соединение в юнит-тесте
+        // значит проверять сеть, а не ожидание.
+        let (tx, rx) = crossbeam_channel::bounded::<u32>(1);
+
+        let sender = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            let _ = tx.send(7);
+        });
+
+        let started = std::time::Instant::now();
+        let got = rx.recv_timeout(Duration::from_secs(5));
+        let waited = started.elapsed();
+        sender.join().expect("поток отправителя упал");
+
+        assert_eq!(got, Ok(7), "кадр обязан дойти");
+        // Проснулись по кадру (~20 мс), а не досидели до таймаута (5 с).
+        // Порог с большим запасом: тест не должен падать от загрузки
+        // машины, но обязан падать, если ожидание идёт до таймаута.
+        assert!(
+            waited < Duration::from_secs(1),
+            "ожидание длилось {waited:?}: проснулись не по кадру"
+        );
+    }
+
+    #[test]
+    fn waiting_gives_up_when_nothing_arrives() {
+        // Обратное свойство: если кадра нет, ждать вечно нельзя.
+        // Клиент обязан вернуться в цикл и перерисовать окно, иначе
+        // Windows пометит его зависшим (находка 37) — а на статичном
+        // экране хост честно ничего не шлёт.
+        let (_tx, rx) = crossbeam_channel::bounded::<u32>(1);
+
+        let started = std::time::Instant::now();
+        let got = rx.recv_timeout(Duration::from_millis(30));
+        assert!(got.is_err(), "пустой канал не должен ничего выдать");
+        assert!(
+            started.elapsed() >= Duration::from_millis(25),
+            "вернулись раньше таймаута — ожидания не было"
         );
     }
 }

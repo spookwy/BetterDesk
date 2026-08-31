@@ -63,9 +63,15 @@ name = "bd-client"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bd-capture",
+ "bd-codec",
  "bd-core",
+ "bd-input",
+ "bd-render",
+ "bd-transport",
  "tracing",
  "tracing-subscriber",
+ "windows",
 ]
 
 [[package]]
@@ -102,9 +108,14 @@ name = "bd-host"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bd-capture",
+ "bd-codec",
  "bd-core",
+ "bd-input",
+ "bd-transport",
  "tracing",
  "tracing-subscriber",
+ "windows",
 ]
 
 [[package]]

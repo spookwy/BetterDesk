@@ -7,6 +7,23 @@ publish.workspace = true
 
 [dependencies]
 bd-core.workspace = true
+# Захват экрана клиенту не нужен: он показывает чужой. Крейт берётся
+# ради D3D11-устройства (`D3dDevice::for_decode`) — на нём живут
+# декодер и окно вывода.
+bd-capture.workspace = true
+bd-codec.workspace = true
+bd-render.workspace = true
+bd-input.workspace = true
+bd-transport.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+# Нужен мосту ввода: он разбирает сырые сообщения окна (WM_KEYDOWN и
+# прочие). Больше клиент из Win32 ничего не трогает — окно и декодер
+# спрятаны за bd-render и bd-codec (CLAUDE.md §4.2.2).
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+] }
