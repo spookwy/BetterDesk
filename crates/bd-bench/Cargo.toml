@@ -5,6 +5,12 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[build-dependencies]
+# Проверка наличия libclang — то же условие, что в bd-codec.
+# Без неё флаг nvenc_available разошёлся бы с реальностью на машине
+# без LLVM (находка 61).
+libloading = "0.8"
+
 [dependencies]
 bd-core.workspace = true
 bd-capture.workspace = true

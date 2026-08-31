@@ -29,3 +29,9 @@ windows = { version = "0.62", features = [
 
 [build-dependencies]
 bindgen = "0.72"
+# Проверка наличия libclang ДО генерации биндингов.
+#
+# Без неё `bindgen` паникует прямо в build.rs, и клиент не собирается
+# на машине без LLVM — хотя NVENC ему не нужен (находка 61). Тот же
+# крейт уже используется в рантайме для загрузки nvEncodeAPI64.dll.
+libloading = "0.8"

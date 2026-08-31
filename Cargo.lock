@@ -114,6 +114,7 @@ dependencies = [
  "bd-input",
  "bd-render",
  "bd-transport",
+ "libloading 0.8.9",
  "tracing",
  "tracing-subscriber",
  "windows 0.62.2",
