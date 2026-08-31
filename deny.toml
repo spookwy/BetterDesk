@@ -1,0 +1,61 @@
+# cargo-deny: автоматическая защита от GPL/AGPL-зависимостей.
+#
+# Продукт закрытый и платный (CLAUDE.md §9.1) — одна GPL-зависимость
+# юридически обязывает открыть весь исходный код. Настроено на этапе 0,
+# до накопления зависимостей: убирать GPL-крейт из готового проекта
+# намного дороже, чем не добавлять его.
+#
+# Запуск: cargo deny check
+
+[graph]
+targets = [{ triple = "x86_64-pc-windows-msvc" }]
+all-features = false
+
+[licenses]
+version = 2
+# Белый список. Всё, чего здесь нет, роняет проверку.
+# Записи добавляются по мере появления реальных зависимостей —
+# лишние строки cargo-deny помечает как unmatched.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",   # openh264 — софт-декодер (CLAUDE.md §5.5)
+    "BSD-3-Clause",
+    "ISC",           # libloading — пермиссивная, эквивалент BSD-2
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.9
+
+# Наши собственные крейты (publish = false) намеренно не имеют
+# SPDX-лицензии: продукт закрытый. Это не повод падать.
+[licenses.private]
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Наши внутренние path-зависимости версии не имеют — это норма для
+# workspace. Правило остаётся в силе для внешних крейтов.
+allow-wildcard-paths = true
+
+# Крейты, запрещённые явно, с указанием причины.
+# Список пополняется, когда обнаруживается опасная альтернатива.
+deny = [
+    # x264 — GPL. Для софт-кодека использовать openh264 (BSD-2-Clause).
+    { name = "x264", reason = "GPL: несовместима с закрытым продуктом" },
+    { name = "x264-sys", reason = "GPL: несовместима с закрытым продуктом" },
+    # Полный стек WebRTC не берём — только ICE (docs/stack-analysis.md, вариант C).
+    { name = "webrtc", reason = "тяжелее нужного; берём только ICE через str0m" },
+]
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

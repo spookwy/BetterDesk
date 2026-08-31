@@ -1,0 +1,56 @@
+# CI: то же, что запускается локально перед коммитом (CLAUDE.md §10.2).
+# Раннер windows — проект собирается только под MSVC.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        # Версия берётся из rust-toolchain.toml
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --workspace
+
+      # Главная защита проекта: закрытый продукт не должен получить
+      # GPL/AGPL-зависимость (CLAUDE.md §9.1).
+      - name: Licenses
+        run: |
+          cargo install cargo-deny --locked
+          cargo deny check licenses bans sources
+
+  # bd-core обязан собираться без платформенных зависимостей
+  # (CLAUDE.md §4.2.1). Ломается незаметно, поэтому проверяется отдельно.
+  #
+  # bd-transport здесь же: он двигает байты и не знает про Windows.
+  # Первая же случайная платформенная зависимость закроет дорогу
+  # к веб-клиенту и серверной части, и заметить это без отдельной
+  # проверки будет негде — весь остальной CI работает на Windows.
+  core-portable:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Build portable crates on Linux
+        run: cargo build -p bd-core -p bd-transport
+      - name: Test portable crates on Linux
+        run: cargo test -p bd-core -p bd-transport

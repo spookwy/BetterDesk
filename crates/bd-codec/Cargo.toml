@@ -1,0 +1,31 @@
+[package]
+name = "bd-codec"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+bd-core.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# nvEncodeAPI64.dll грузится в рантайме, а не линкуется: сборка
+# не требует SDK, а машина без NVIDIA GPU получает понятную ошибку.
+libloading = "0.8"
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Direct3D11",
+    # Декодер: аппаратный H.264 MFT с D3D11VA (CLAUDE.md §5.5).
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    # VARIANT для ICodecAPI::SetValue — требует и Ole (§5.2).
+    "Win32_System_Ole",
+    "Win32_System_Variant",
+] }
+
+[build-dependencies]
+bindgen = "0.72"

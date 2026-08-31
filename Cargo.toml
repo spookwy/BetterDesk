@@ -1,0 +1,62 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/bd-core",
+    "crates/bd-capture",
+    "crates/bd-codec",
+    "crates/bd-transport",
+    "crates/bd-crypto",
+    "crates/bd-input",
+    "crates/bd-audio",
+    "crates/bd-render",
+    "crates/bd-host",
+    "crates/bd-client",
+    "crates/bd-bench",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.98"
+# Закрытый продукт: валидного SPDX-идентификатора нет намеренно.
+# Наши крейты разрешаются через [licenses.private] в deny.toml.
+publish = false
+
+# Единые версии для всего workspace. Крейты ссылаются через
+# `workspace = true`, чтобы версии не разъезжались.
+[workspace.dependencies]
+bd-core = { path = "crates/bd-core" }
+bd-capture = { path = "crates/bd-capture" }
+bd-codec = { path = "crates/bd-codec" }
+bd-transport = { path = "crates/bd-transport" }
+bd-crypto = { path = "crates/bd-crypto" }
+bd-input = { path = "crates/bd-input" }
+bd-audio = { path = "crates/bd-audio" }
+bd-render = { path = "crates/bd-render" }
+
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+crossbeam-channel = "0.5"
+
+# QUIC. Только в bd-transport и серверной части (CLAUDE.md §4.4):
+# пайплайн захват→энкод→рендер остаётся на синхронных потоках,
+# потому что у нас один поток кадров с жёстким дедлайном, а не
+# тысячи соединений.
+quinn = "0.11"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rcgen = "0.13"
+tokio = { version = "1", features = ["rt", "net", "time", "sync", "macros"] }
+
+[profile.release]
+# Пайплайн кадров чувствителен к задержке, а не к размеру бинарника.
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+panic = "abort"
+debug = 1          # символы для профилирования, на скорость не влияет
+
+[profile.bench]
+inherits = "release"
+debug = 2

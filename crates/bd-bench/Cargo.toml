@@ -1,0 +1,69 @@
+[package]
+name = "bd-bench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+bd-core.workspace = true
+bd-capture.workspace = true
+bd-codec.workspace = true
+bd-render.workspace = true
+bd-input.workspace = true
+bd-transport.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[[bin]]
+name = "loopback"
+path = "src/bin/loopback.rs"
+
+[[bin]]
+name = "capture_probe"
+path = "src/bin/capture_probe.rs"
+
+[[bin]]
+name = "nvenc_probe"
+path = "src/bin/nvenc_probe.rs"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi_Common",
+] }
+
+[[bin]]
+name = "encode_probe"
+path = "src/bin/encode_probe.rs"
+
+[[bin]]
+name = "decode_probe"
+path = "src/bin/decode_probe.rs"
+
+[[bin]]
+name = "recover_probe"
+path = "src/bin/recover_probe.rs"
+
+[[bin]]
+name = "quality_probe"
+path = "src/bin/quality_probe.rs"
+
+[[bin]]
+name = "input_probe"
+path = "src/bin/input_probe.rs"
+
+[[bin]]
+name = "quic_probe"
+path = "src/bin/quic_probe.rs"
+
+[[bin]]
+name = "machine_probe"
+path = "src/bin/machine_probe.rs"
+
+[[bin]]
+name = "mfenc_probe"
+path = "src/bin/mfenc_probe.rs"

@@ -1,0 +1,22 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Секреты и локальные ключи устройства (docs/security-model.md §3.1)
+*.pem
+*.key
+/.env
+/local/
+
+# Node / Tauri (с этапа 7)
+node_modules/
+/ui/dist/
+/ui/src-tauri/target/
+
+# Измерения и логи
+/logs/
+*.log
+
+# Windows
+Thumbs.db
+desktop.ini
