@@ -658,12 +658,10 @@ mod run {
     /// сигналинг при регистрации (§5.4) — это придёт вместе с
     /// аккаунтами, пока же сервер принимает тот, что мы назвали.
     fn device_id() -> DeviceId {
-        let seed = format!(
-            "{}{1}{}",
-            std::env::var("COMPUTERNAME").unwrap_or_default(),
-            std::env::var("USERNAME").unwrap_or_default(),
-        );
-        DeviceId::derive(&seed)
+        // Общий источник: тот же ID показывает оболочка. Пока каждый
+        // считал сам, копии разошлись и машина получила два разных
+        // ID (см. DeviceId::of_this_machine).
+        DeviceId::of_this_machine()
     }
 
     fn parse_flag(name: &str) -> bool {
