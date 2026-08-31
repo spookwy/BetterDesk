@@ -1,0 +1,657 @@
+<title>BetterDesk Design Tokens</title>
+<style>
+  /* ── Токены. Единственное место, где живут значения. ──────────
+     CLAUDE.md §6.2: «Дизайн-токены обязательны с первого дня».
+     Все цвета, радиусы и отступы ниже берутся только отсюда. */
+  :root {
+    /* Основа. Не чистый чёрный текст — §6.2. */
+    --bg:            #F2F3F5;
+    --surface:       #FFFFFF;
+    --surface-sunk:  #FAFAFA;
+    --text:          #1A1A1A;
+    /* Нейтральные с лёгким уклоном в синий акцент: чистый серый
+       читается как невыбранный, этот — как выбранный. */
+    --text-muted:    #5C6370;
+    --text-faint:    #8A909B;
+    --border:        #E4E6EA;
+    --border-strong: #D4D7DD;
+
+    /* Один акцент. Только для главного действия на экране. */
+    --accent:        #2E6BE6;
+    --accent-hover:  #2559C4;
+    --accent-sunk:   #EAF0FD;
+
+    /* Семантика состояний. Это НЕ акцент: акцент — про действие,
+       эти — про состояние машины. */
+    --ok:            #1E8E5A;
+    --ok-sunk:       #E6F4EC;
+    --warn:          #B26A00;
+    --warn-sunk:     #FDF3E2;
+    --danger:        #C0392B;
+
+    /* Скругления: 12 карточки, 8 кнопки и поля. */
+    --r-card:        12px;
+    --r-ctl:         8px;
+
+    /* Тени: очень мягкие, разделение через воздух. */
+    --shadow:        0 1px 3px rgba(16, 24, 40, 0.06);
+    --shadow-lift:   0 4px 12px rgba(16, 24, 40, 0.10);
+
+    /* Ритм кратен 4, базовый шаг 16. */
+    --s1: 4px;  --s2: 8px;  --s3: 12px; --s4: 16px;
+    --s5: 24px; --s6: 32px; --s7: 48px;
+
+    /* Шрифт — системный. На Win11 это Segoe UI Variable. */
+    --font: "Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI",
+            system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+    --font-mono: "Cascadia Mono", "Consolas", ui-monospace, monospace;
+
+    --dur: 170ms;
+    --ease: cubic-bezier(0.2, 0, 0.2, 1);
+  }
+
+  /* Тёмная тема заведена сразу — §6.2: добавлять её потом
+     в разбросанные хардкод-цвета дороже в разы. Токены те же,
+     значения другие; ни один компонент ниже не меняется. */
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg:            #16181C;
+      --surface:       #1E2126;
+      --surface-sunk:  #24272D;
+      --text:          #ECEDEF;
+      --text-muted:    #A2A9B5;
+      --text-faint:    #767D89;
+      --border:        #2E323A;
+      --border-strong: #3C414B;
+      --accent:        #5B8FF0;
+      --accent-hover:  #7BA6F4;
+      --accent-sunk:   #1B2740;
+      --ok:            #4CAF7D;
+      --ok-sunk:       #16281F;
+      --warn:          #D99B3C;
+      --warn-sunk:     #2B2114;
+      --danger:        #E06B5D;
+      --shadow:        0 1px 3px rgba(0, 0, 0, 0.36);
+      --shadow-lift:   0 4px 12px rgba(0, 0, 0, 0.44);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg:            #16181C;
+    --surface:       #1E2126;
+    --surface-sunk:  #24272D;
+    --text:          #ECEDEF;
+    --text-muted:    #A2A9B5;
+    --text-faint:    #767D89;
+    --border:        #2E323A;
+    --border-strong: #3C414B;
+    --accent:        #5B8FF0;
+    --accent-hover:  #7BA6F4;
+    --accent-sunk:   #1B2740;
+    --ok:            #4CAF7D;
+    --ok-sunk:       #16281F;
+    --warn:          #D99B3C;
+    --warn-sunk:     #2B2114;
+    --danger:        #E06B5D;
+    --shadow:        0 1px 3px rgba(0, 0, 0, 0.36);
+    --shadow-lift:   0 4px 12px rgba(0, 0, 0, 0.44);
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font);
+    font-size: 13px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .page {
+    max-width: 1080px;
+    margin: 0 auto;
+    padding: var(--s7) var(--s5) var(--s7);
+    display: flex;
+    flex-direction: column;
+    gap: var(--s7);
+  }
+
+  /* ── Заголовок документа ────────────────────────────────── */
+  .doc-head { display: flex; flex-direction: column; gap: var(--s2); }
+  .doc-head h1 {
+    margin: 0;
+    font-size: 20px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    text-wrap: balance;
+  }
+  .doc-head p {
+    margin: 0;
+    max-width: 62ch;
+    color: var(--text-muted);
+  }
+  .doc-head .ref {
+    margin-top: var(--s1);
+    font-size: 11px;
+    color: var(--text-faint);
+  }
+
+  .section { display: flex; flex-direction: column; gap: var(--s4); }
+  .section > h2 {
+    margin: 0;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+  }
+
+  /* ── Палитра ────────────────────────────────────────────── */
+  .swatches {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+    gap: var(--s3);
+  }
+  .swatch {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--r-card);
+    overflow: hidden;
+    box-shadow: var(--shadow);
+  }
+  .swatch .chip { height: 52px; border-bottom: 1px solid var(--border); }
+  .swatch .meta { padding: var(--s2) var(--s3) var(--s3); }
+  .swatch .name { font-weight: 600; font-size: 12px; }
+  .swatch .val {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-faint);
+    font-variant-numeric: tabular-nums;
+  }
+  .swatch .use { margin-top: var(--s1); font-size: 11px; color: var(--text-muted); }
+
+  /* ── Макет главного экрана ──────────────────────────────── */
+  .mock-frame {
+    background: var(--surface-sunk);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--r-card);
+    box-shadow: var(--shadow-lift);
+    overflow: hidden;
+  }
+  .titlebar {
+    display: flex;
+    align-items: center;
+    gap: var(--s2);
+    padding: var(--s3) var(--s4);
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+  }
+  .titlebar .name { font-weight: 600; }
+  .titlebar .dots { margin-left: auto; display: flex; gap: var(--s2); }
+  .titlebar .dots i {
+    width: 11px; height: 11px; border-radius: 50%;
+    background: var(--border-strong);
+    display: block;
+  }
+
+  .mock-body {
+    padding: var(--s6) var(--s6) var(--s7);
+    display: flex;
+    flex-direction: column;
+    gap: var(--s6);
+  }
+
+  /* Свой ID — самый крупный объект экрана. */
+  .id-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--r-card);
+    padding: var(--s5);
+    box-shadow: var(--shadow);
+    display: flex;
+    flex-direction: column;
+    gap: var(--s4);
+  }
+  .label {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+  }
+  .id-row { display: flex; align-items: center; gap: var(--s4); flex-wrap: wrap; }
+  .id-value {
+    font-family: var(--font-mono);
+    font-size: 34px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.1;
+  }
+
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--s2);
+    padding: var(--s1) var(--s3);
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+    background: var(--ok-sunk);
+    color: var(--ok);
+  }
+  .pill i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+  .pill.warn { background: var(--warn-sunk); color: var(--warn); }
+
+  .pw-row {
+    display: flex;
+    align-items: baseline;
+    gap: var(--s3);
+    padding-top: var(--s4);
+    border-top: 1px solid var(--border);
+    flex-wrap: wrap;
+  }
+  .pw-value {
+    font-family: var(--font-mono);
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: 0.14em;
+  }
+  .pw-note { font-size: 11px; color: var(--text-faint); }
+
+  /* Кнопки. Акцент — только у главного действия. */
+  .btn {
+    font: inherit;
+    font-weight: 600;
+    padding: var(--s2) var(--s4);
+    border-radius: var(--r-ctl);
+    border: 1px solid var(--border-strong);
+    background: var(--surface);
+    color: var(--text);
+    cursor: pointer;
+    transition: background var(--dur) var(--ease),
+                border-color var(--dur) var(--ease);
+  }
+  .btn:hover { background: var(--surface-sunk); border-color: var(--text-faint); }
+  .btn-primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #FFFFFF;
+  }
+  .btn-primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+  .btn:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  /* Подключение к чужой машине. */
+  .connect { display: flex; flex-direction: column; gap: var(--s3); }
+  .connect-row { display: flex; gap: var(--s3); flex-wrap: wrap; }
+  .field {
+    flex: 1 1 240px;
+    min-width: 0;
+    font: inherit;
+    font-family: var(--font-mono);
+    font-size: 15px;
+    letter-spacing: 0.08em;
+    padding: var(--s3) var(--s4);
+    border-radius: var(--r-ctl);
+    border: 1px solid var(--border-strong);
+    background: var(--surface);
+    color: var(--text);
+    transition: border-color var(--dur) var(--ease),
+                box-shadow var(--dur) var(--ease);
+  }
+  .field::placeholder { color: var(--text-faint); letter-spacing: 0.04em; }
+  .field:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-sunk);
+  }
+
+  /* Сохранённые машины — карточками. */
+  .machines { display: flex; flex-direction: column; gap: var(--s3); }
+  .machine {
+    display: flex;
+    align-items: center;
+    gap: var(--s4);
+    padding: var(--s4);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--r-card);
+    box-shadow: var(--shadow);
+    transition: border-color var(--dur) var(--ease),
+                box-shadow var(--dur) var(--ease);
+  }
+  .machine:hover { border-color: var(--border-strong); box-shadow: var(--shadow-lift); }
+  .machine .avatar {
+    width: 38px; height: 38px;
+    flex: none;
+    border-radius: var(--r-ctl);
+    background: var(--accent-sunk);
+    color: var(--accent);
+    display: grid;
+    place-items: center;
+    font-weight: 600;
+    font-size: 14px;
+  }
+  .machine .who { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .machine .who b { font-weight: 600; }
+  .machine .who span {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-faint);
+    font-variant-numeric: tabular-nums;
+  }
+  .machine .state { margin-left: auto; display: flex; align-items: center; gap: var(--s3); }
+  .machine .seen { font-size: 11px; color: var(--text-faint); }
+
+  /* ── Типографика и ритм ─────────────────────────────────── */
+  .specs {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: var(--s3);
+  }
+  .spec {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--r-card);
+    padding: var(--s4);
+    box-shadow: var(--shadow);
+    display: flex;
+    flex-direction: column;
+    gap: var(--s3);
+  }
+  .spec h3 {
+    margin: 0;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+  }
+  .type-row { display: flex; align-items: baseline; gap: var(--s3); }
+  .type-row .tag {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-faint);
+    flex: none;
+    width: 62px;
+    font-variant-numeric: tabular-nums;
+  }
+  .t20 { font-size: 20px; font-weight: 600; letter-spacing: -0.01em; }
+  .t13 { font-size: 13px; }
+  .t11 { font-size: 11px; color: var(--text-muted); }
+
+  .ramp { display: flex; align-items: flex-end; gap: var(--s2); }
+  .ramp div {
+    background: var(--accent-sunk);
+    border: 1px solid var(--accent);
+    border-radius: 3px;
+    flex: 1;
+  }
+  .ramp span {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-faint);
+  }
+
+  /* ── Заметка ────────────────────────────────────────────── */
+  .note {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    border-radius: var(--r-ctl);
+    padding: var(--s4);
+    color: var(--text-muted);
+    max-width: 68ch;
+  }
+  .note b { color: var(--text); font-weight: 600; }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
+  }
+  @media (max-width: 640px) {
+    .page { padding: var(--s5) var(--s4); gap: var(--s6); }
+    .mock-body { padding: var(--s4); gap: var(--s5); }
+    .id-value { font-size: 26px; }
+  }
+</style>
+
+<div class="page">
+
+  <header class="doc-head">
+    <h1>BetterDesk — дизайн-система и главный экран</h1>
+    <p>
+      Токены и макет по CLAUDE.md §6.2. Это не код продукта: §11 запрещает UI,
+      пока не закрыт этап 3. Здесь решается только то, как оно выглядит, —
+      чтобы на этапе 7 не изобретать это заново и не разносить цвета по файлам.
+    </p>
+    <div class="ref">Светлая и тёмная темы переключаются вместе с темой системы.</div>
+  </header>
+
+  <section class="section">
+    <h2>Палитра</h2>
+    <div class="swatches">
+      <div class="swatch">
+        <div class="chip" style="background: var(--surface)"></div>
+        <div class="meta">
+          <div class="name">surface</div>
+          <div class="val">#FFFFFF</div>
+          <div class="use">Карточки, поля, кнопки</div>
+        </div>
+      </div>
+      <div class="swatch">
+        <div class="chip" style="background: var(--surface-sunk)"></div>
+        <div class="meta">
+          <div class="name">surface-sunk</div>
+          <div class="val">#FAFAFA</div>
+          <div class="use">Фон окна</div>
+        </div>
+      </div>
+      <div class="swatch">
+        <div class="chip" style="background: var(--text)"></div>
+        <div class="meta">
+          <div class="name">text</div>
+          <div class="val">#1A1A1A</div>
+          <div class="use">Основной текст, не чёрный</div>
+        </div>
+      </div>
+      <div class="swatch">
+        <div class="chip" style="background: var(--text-muted)"></div>
+        <div class="meta">
+          <div class="name">text-muted</div>
+          <div class="val">#5C6370</div>
+          <div class="use">Вторичный. Уклон в синий</div>
+        </div>
+      </div>
+      <div class="swatch">
+        <div class="chip" style="background: var(--accent)"></div>
+        <div class="meta">
+          <div class="name">accent</div>
+          <div class="val">#2E6BE6</div>
+          <div class="use">Только главное действие</div>
+        </div>
+      </div>
+      <div class="swatch">
+        <div class="chip" style="background: var(--ok)"></div>
+        <div class="meta">
+          <div class="name">ok</div>
+          <div class="val">#1E8E5A</div>
+          <div class="use">Состояние, не действие</div>
+        </div>
+      </div>
+      <div class="swatch">
+        <div class="chip" style="background: var(--warn)"></div>
+        <div class="meta">
+          <div class="name">warn</div>
+          <div class="val">#B26A00</div>
+          <div class="use">Ждёт внимания</div>
+        </div>
+      </div>
+      <div class="swatch">
+        <div class="chip" style="background: var(--border)"></div>
+        <div class="meta">
+          <div class="name">border</div>
+          <div class="val">#E4E6EA</div>
+          <div class="use">Разделение без резкости</div>
+        </div>
+      </div>
+    </div>
+    <div class="note">
+      <b>Акцент один.</b> Синий стоит ровно на одной кнопке экрана — «Подключиться».
+      Зелёный и оранжевый акцентами не являются: они сообщают состояние машины,
+      а не предлагают действие. Как только акцентом покрашено второе действие,
+      главного на экране не остаётся.
+    </div>
+  </section>
+
+  <section class="section">
+    <h2>Главный экран</h2>
+    <div class="mock-frame">
+      <div class="titlebar">
+        <span class="name">BetterDesk</span>
+        <span class="dots"><i></i><i></i><i></i></span>
+      </div>
+      <div class="mock-body">
+
+        <div class="id-card">
+          <div class="label">ID этого компьютера</div>
+          <div class="id-row">
+            <div class="id-value">418&nbsp;207&nbsp;356</div>
+            <button class="btn" type="button">Копировать</button>
+            <span class="pill"><i></i>Готов принимать</span>
+          </div>
+          <div class="pw-row">
+            <span class="label" style="text-transform: none; letter-spacing: 0">Пароль на сеанс</span>
+            <span class="pw-value">7f2q&#8209;k93m</span>
+            <span class="pw-note">Меняется при каждом запуске</span>
+          </div>
+        </div>
+
+        <div class="connect">
+          <div class="label">Подключиться к другому компьютеру</div>
+          <div class="connect-row">
+            <input class="field" type="text" placeholder="Введите ID из девяти цифр" aria-label="ID удалённого компьютера">
+            <button class="btn btn-primary" type="button">Подключиться</button>
+          </div>
+        </div>
+
+        <div class="connect">
+          <div class="label">Сохранённые</div>
+          <div class="machines">
+            <div class="machine">
+              <div class="avatar">ДК</div>
+              <div class="who">
+                <b>Домашний компьютер</b>
+                <span>418 207 356</span>
+              </div>
+              <div class="state">
+                <span class="pill"><i></i>В сети</span>
+                <button class="btn" type="button">Подключиться</button>
+              </div>
+            </div>
+            <div class="machine">
+              <div class="avatar">НБ</div>
+              <div class="who">
+                <b>Ноутбук — работа</b>
+                <span>903 114 728</span>
+              </div>
+              <div class="state">
+                <span class="seen">Был 2 часа назад</span>
+                <button class="btn" type="button">Подключиться</button>
+              </div>
+            </div>
+            <div class="machine">
+              <div class="avatar">ПД</div>
+              <div class="who">
+                <b>ПК друга</b>
+                <span>552 640 019</span>
+              </div>
+              <div class="state">
+                <span class="pill warn"><i></i>Ключ сменился</span>
+                <button class="btn" type="button">Проверить</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+    <div class="note">
+      <b>Никаких вкладок и меню</b> — §6.2. На первом экране три вещи: свой ID,
+      поле для чужого, список сохранённых. «Ключ сменился» показан намеренно:
+      §7.3 требует громкого предупреждения при смене ключа хоста, и такое
+      состояние должно быть нарисовано заранее, а не придумываться в спешке,
+      когда оно впервые случится у живого человека.
+    </div>
+  </section>
+
+  <section class="section">
+    <h2>Типографика и ритм</h2>
+    <div class="specs">
+      <div class="spec">
+        <h3>Размеры</h3>
+        <div class="type-row"><span class="tag">20 / 600</span><span class="t20">Заголовок экрана</span></div>
+        <div class="type-row"><span class="tag">13 / 400</span><span class="t13">Основной текст, межстрочный 1.5</span></div>
+        <div class="type-row"><span class="tag">11 / 400</span><span class="t11">Вторичный: подписи, состояния</span></div>
+      </div>
+      <div class="spec">
+        <h3>Шаг отступов, кратно 4</h3>
+        <div class="ramp" style="height: 64px">
+          <div style="height: 12%"></div>
+          <div style="height: 22%"></div>
+          <div style="height: 34%"></div>
+          <div style="height: 46%"></div>
+          <div style="height: 68%"></div>
+          <div style="height: 88%"></div>
+          <div style="height: 100%"></div>
+        </div>
+        <div class="type-row" style="justify-content: space-between">
+          <span class="ramp"><span>4</span></span>
+          <span class="ramp"><span>8</span></span>
+          <span class="ramp"><span>12</span></span>
+          <span class="ramp"><span>16</span></span>
+          <span class="ramp"><span>24</span></span>
+          <span class="ramp"><span>32</span></span>
+          <span class="ramp"><span>48</span></span>
+        </div>
+      </div>
+      <div class="spec">
+        <h3>Скругления и тень</h3>
+        <div class="type-row">
+          <span class="tag">12px</span>
+          <span style="display:inline-block;width:64px;height:34px;background:var(--surface-sunk);border:1px solid var(--border);border-radius:var(--r-card);box-shadow:var(--shadow)"></span>
+          <span class="t11">карточки</span>
+        </div>
+        <div class="type-row">
+          <span class="tag">8px</span>
+          <span style="display:inline-block;width:64px;height:28px;background:var(--surface-sunk);border:1px solid var(--border);border-radius:var(--r-ctl)"></span>
+          <span class="t11">кнопки, поля</span>
+        </div>
+        <div class="type-row"><span class="tag">170ms</span><span class="t11">ease-out, только на смену состояния</span></div>
+      </div>
+      <div class="spec">
+        <h3>Цифры</h3>
+        <div class="type-row"><span class="tag">ID</span><span style="font-family:var(--font-mono);font-variant-numeric:tabular-nums">418 207 356</span></div>
+        <div class="type-row"><span class="tag">задержка</span><span style="font-family:var(--font-mono);font-variant-numeric:tabular-nums">8.02 мс</span></div>
+        <div class="type-row"><span class="t11">Моноширинные с табличными цифрами: ID и метрики читаются
+          столбиком и не «прыгают» при обновлении.</span></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <h2>Чего здесь намеренно нет</h2>
+    <div class="note">
+      <b>Окна сессии.</b> Видео никогда не рендерится в webview (§6.1): оно живёт
+      в отдельном нативном окне с D3D11-swapchain, а оверлей поверх него рисуется
+      тем же Direct2D, что и сейчас в пробе. Tauri про это окно не знает.
+      Нарисовать сессию «страницей» значило бы заложить в дизайн ровно ту
+      архитектуру, которую проект отвергает — с композитингом браузера
+      и лишними 10–20 мс.
+    </div>
+  </section>
+
+</div>
