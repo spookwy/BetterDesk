@@ -1,0 +1,39 @@
+# Облачная часть — ОТДЕЛЬНЫЙ workspace (CLAUDE.md §4.1).
+#
+# Почему отдельный: сервер собирается под Linux и деплоится на VPS,
+# а клиентский workspace прибит к x86_64-pc-windows-msvc в
+# rust-toolchain.toml. Один workspace заставил бы каждую сборку
+# сервера тянуть windows-крейты, а каждую сборку клиента — axum
+# и tokio целиком.
+#
+# Общего кода у них пока нет намеренно. Когда появится (типы
+# протокола сигналинга), он поедет отдельным крейтом, а не
+# слиянием workspace'ов.
+[workspace]
+resolver = "2"
+members = ["signaling"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.98"
+publish = false
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
+axum = { version = "0.8", features = ["ws"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+
+# Протокол сигналинга общий с клиентом. bd-core портируем и
+# собирается под Linux (§4.2.1) — именно поэтому общие типы лежат
+# в нём, а не дублируются здесь. Дублирование разошлось бы: формат
+# менялся бы на одной стороне и молча ломал другую.
+bd-core = { path = "../crates/bd-core" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"

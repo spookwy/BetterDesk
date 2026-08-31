@@ -9,15 +9,19 @@
 
 pub mod clocksync;
 pub mod cursor;
+pub mod device;
 pub mod frame;
 pub mod input;
 pub mod metrics;
 pub mod pacing;
+pub mod signaling;
 pub mod time;
 
 pub use clocksync::ClockSync;
 pub use cursor::{CursorPosition, CursorShape, CursorShapeCache, CursorShapeKind};
+pub use device::DeviceId;
 pub use frame::{FrameInfo, FrameSize, PixelFormat};
 pub use input::{InputEvent, KeyCode, MouseButton, MousePosition, SequencedInput};
 pub use pacing::FrameLimiter;
+pub use signaling::{ClientMessage, ServerMessage};
 pub use time::{now, Instant, Timestamp};

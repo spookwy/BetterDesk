@@ -29,3 +29,6 @@ desktop.ini
 
 # Артефакты Tauri: генерируются при сборке.
 /ui/src-tauri/gen/
+
+# Сборка серверного workspace (у него свой target/).
+/server/target/
