@@ -1,0 +1,9 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Права окна оболочки. Минимум: только то, чем экран действительно пользуется.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default"
+  ]
+}

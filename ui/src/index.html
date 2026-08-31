@@ -1,0 +1,457 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>BetterDesk</title>
+<!-- Токены — производная от docs/design/tokens.css, копируется
+     сборкой (ui/src-tauri/build.rs). Править ТОЛЬКО оригинал. -->
+<link rel="stylesheet" href="tokens.css">
+<style>
+  /* Компоненты. Ни одного литерального цвета: только var(--...),
+     иначе смена палитры перестаёт быть заменой одного файла. */
+
+  * { box-sizing: border-box; }
+
+  /* `hidden` обязан побеждать любой `display` из класса.
+     Без этой строки атрибут не работает на всём, чему задан
+     display: inline-flex/grid/block — а это здесь почти всё.
+     Дефект был живым: оба значка состояния («Готов принимать»
+     и «Только просмотр») показывались одновременно, и оранжевый
+     перекрывал зелёный. Бэкенд при этом отвечал верно — врала
+     вёрстка, и ни ошибки, ни неверной цифры это не давало. */
+  [hidden] { display: none !important; }
+
+  html, body { height: 100%; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font);
+    font-size: var(--fs-body);
+    line-height: var(--lh);
+    -webkit-font-smoothing: antialiased;
+    /* Оболочка — не веб-страница: выделять текст мышью тут незачем,
+       а случайное выделение при перетаскивании выглядит неряшливо.
+       Поля ввода исключены ниже. */
+    user-select: none;
+    cursor: default;
+    overflow-y: auto;
+    overflow-x: hidden;
+  }
+
+  input, textarea { user-select: text; }
+
+  .app {
+    max-width: 620px;
+    margin: 0 auto;
+    padding: var(--s6) var(--s5) var(--s7);
+    display: flex;
+    flex-direction: column;
+    gap: var(--s5);
+  }
+
+  .label {
+    font-size: var(--fs-small);
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+  }
+
+  /* ── Свой ID: самый крупный объект экрана ───────────────── */
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--r-card);
+    box-shadow: var(--shadow);
+  }
+
+  .id-card {
+    padding: var(--s5);
+    display: flex;
+    flex-direction: column;
+    gap: var(--s4);
+  }
+
+  .id-row {
+    display: flex;
+    align-items: center;
+    gap: var(--s4);
+    flex-wrap: wrap;
+  }
+
+  .id-value {
+    font-family: var(--font-mono);
+    font-size: 32px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.1;
+    user-select: text;
+  }
+
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--s2);
+    padding: var(--s1) var(--s3);
+    border-radius: 999px;
+    font-size: var(--fs-small);
+    font-weight: 600;
+    background: var(--ok-sunk);
+    color: var(--ok);
+    white-space: nowrap;
+  }
+  .pill i {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+    flex: none;
+  }
+  .pill.warn   { background: var(--warn-sunk);   color: var(--warn); }
+  .pill.danger { background: var(--danger-sunk); color: var(--danger); }
+
+  .pw-row {
+    display: flex;
+    align-items: baseline;
+    gap: var(--s3);
+    padding-top: var(--s4);
+    border-top: 1px solid var(--border);
+    flex-wrap: wrap;
+  }
+  .pw-value {
+    font-family: var(--font-mono);
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: 0.14em;
+    user-select: text;
+  }
+  .pw-note { font-size: var(--fs-small); color: var(--text-faint); }
+
+  /* ── Кнопки ─────────────────────────────────────────────── */
+  .btn {
+    font: inherit;
+    font-weight: 600;
+    padding: var(--s2) var(--s4);
+    border-radius: var(--r-ctl);
+    border: 1px solid var(--border-strong);
+    background: var(--surface);
+    color: var(--text);
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background var(--dur) var(--ease),
+                border-color var(--dur) var(--ease),
+                color var(--dur) var(--ease);
+  }
+  .btn:hover:not(:disabled) {
+    background: var(--surface-sunk);
+    border-color: var(--text-faint);
+  }
+  .btn:active:not(:disabled) { transform: translateY(0.5px); }
+
+  .btn-primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--surface);
+  }
+  .btn-primary:hover:not(:disabled) {
+    background: var(--accent-hover);
+    border-color: var(--accent-hover);
+  }
+
+  .btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .btn:focus-visible,
+  .field:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  /* ── Подключение ────────────────────────────────────────── */
+  .block { display: flex; flex-direction: column; gap: var(--s3); }
+
+  .connect-row { display: flex; gap: var(--s3); }
+
+  .field {
+    flex: 1 1 auto;
+    min-width: 0;
+    font: inherit;
+    font-family: var(--font-mono);
+    font-size: 15px;
+    letter-spacing: 0.08em;
+    padding: var(--s3) var(--s4);
+    border-radius: var(--r-ctl);
+    border: 1px solid var(--border-strong);
+    background: var(--surface);
+    color: var(--text);
+    transition: border-color var(--dur) var(--ease),
+                box-shadow var(--dur) var(--ease);
+  }
+  .field::placeholder { color: var(--text-faint); letter-spacing: 0.04em; }
+  .field:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-sunk);
+  }
+
+  /* ── Машины ─────────────────────────────────────────────── */
+  .machines { display: flex; flex-direction: column; gap: var(--s3); }
+
+  .machine {
+    display: flex;
+    align-items: center;
+    gap: var(--s4);
+    padding: var(--s4);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--r-card);
+    box-shadow: var(--shadow);
+    transition: border-color var(--dur) var(--ease),
+                box-shadow var(--dur) var(--ease);
+  }
+  .machine:hover {
+    border-color: var(--border-strong);
+    box-shadow: var(--shadow-lift);
+  }
+  .machine .avatar {
+    width: 38px; height: 38px;
+    flex: none;
+    border-radius: var(--r-ctl);
+    background: var(--accent-sunk);
+    color: var(--accent);
+    display: grid;
+    place-items: center;
+    font-weight: 600;
+    font-size: 14px;
+  }
+  .machine .who {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+  .machine .who b {
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .machine .who span {
+    font-family: var(--font-mono);
+    font-size: var(--fs-small);
+    color: var(--text-faint);
+    font-variant-numeric: tabular-nums;
+  }
+  .machine .state {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: var(--s3);
+  }
+  .machine .seen { font-size: var(--fs-small); color: var(--text-faint); }
+
+  /* ── Пустое состояние ───────────────────────────────────── */
+  .empty {
+    padding: var(--s5);
+    text-align: center;
+    color: var(--text-muted);
+    border: 1px dashed var(--border-strong);
+    border-radius: var(--r-card);
+  }
+  .empty b { display: block; color: var(--text); margin-bottom: var(--s1); }
+
+  /* ── Заметки и предупреждения ───────────────────────────── */
+  .note {
+    padding: var(--s3) var(--s4);
+    border-radius: var(--r-ctl);
+    font-size: var(--fs-small);
+    color: var(--text-muted);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+  }
+  .note.warn { border-left-color: var(--warn); }
+  .note b { color: var(--text); }
+
+  /* Полоса «это ещё не работает». Отдельный вид: она сообщает не
+     состояние машины, а незавершённость продукта. */
+  .unbuilt {
+    display: flex;
+    align-items: center;
+    gap: var(--s2);
+    font-size: var(--fs-small);
+    color: var(--warn);
+    background: var(--warn-sunk);
+    padding: var(--s2) var(--s3);
+    border-radius: var(--r-ctl);
+  }
+
+  .foot {
+    margin-top: var(--s2);
+    font-size: var(--fs-small);
+    color: var(--text-faint);
+    text-align: center;
+  }
+
+  /* Появление экрана. Одно движение на загрузку, не декоративное. */
+  .app > * {
+    animation: rise var(--dur) var(--ease) both;
+  }
+  .app > *:nth-child(2) { animation-delay: 30ms; }
+  .app > *:nth-child(3) { animation-delay: 60ms; }
+  .app > *:nth-child(4) { animation-delay: 90ms; }
+
+  @keyframes rise {
+    from { opacity: 0; transform: translateY(4px); }
+    to   { opacity: 1; transform: none; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .app > * { animation: none; }
+    .btn:active:not(:disabled) { transform: none; }
+  }
+</style>
+</head>
+<body>
+
+<div class="app">
+
+  <!-- Свой ID -->
+  <section class="card id-card">
+    <div class="label">ID этого компьютера</div>
+    <div class="id-row">
+      <div class="id-value" id="own-id">— — —</div>
+      <button class="btn" id="copy" type="button">Копировать</button>
+      <span class="pill" id="ready" hidden><i></i>Готов принимать</span>
+      <span class="pill warn" id="not-ready" hidden><i></i>Только просмотр</span>
+    </div>
+    <div class="pw-row">
+      <span class="label" style="text-transform: none; letter-spacing: 0">Пароль на сеанс</span>
+      <span class="pw-value" id="own-pw">————</span>
+      <span class="pw-note">Меняется при каждом запуске</span>
+    </div>
+  </section>
+
+  <div class="note warn" id="limitation" hidden></div>
+
+  <!-- Подключение -->
+  <section class="block">
+    <div class="label">Подключиться к другому компьютеру</div>
+    <div class="connect-row">
+      <input class="field" id="peer-id" type="text" inputmode="numeric"
+             placeholder="Введите ID из девяти цифр"
+             aria-label="ID удалённого компьютера" maxlength="11">
+      <button class="btn btn-primary" id="connect" type="button" disabled>Подключиться</button>
+    </div>
+    <div class="unbuilt">
+      <span>Соединение по ID появится вместе с сервером связи — этап 4. Сейчас кнопка не работает.</span>
+    </div>
+  </section>
+
+  <!-- Сохранённые -->
+  <section class="block">
+    <div class="label">Сохранённые</div>
+    <div class="machines" id="machines">
+      <div class="empty">
+        <b>Пока пусто</b>
+        Компьютеры появятся здесь после первого подключения.
+      </div>
+    </div>
+  </section>
+
+  <div class="foot" id="foot">BetterDesk 0.1.0</div>
+
+</div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+
+  /** Показать состояние машины и свой ID. */
+  async function load() {
+    let info;
+    try {
+      // Мост Tauri берётся ВНУТРИ try, а не строкой выше.
+      //
+      // Иначе `window.__TAURI__.core` кидает при разборе самого
+      // скрипта — до того, как появится хоть один обработчик, — и
+      // экран навсегда остаётся с прочерками, ничего не сообщая.
+      // Ровно это и случилось при первом запуске: моста не было
+      // (в конфиге не стоял `withGlobalTauri`), а вместо объяснения
+      // человек видел «— — —» и решал, что программа сломана.
+      //
+      // Обработка ошибки бесполезна, если она недостижима из места,
+      // где ошибка возникает.
+      const bridge = window.__TAURI__;
+      if (!bridge || !bridge.core) {
+        throw new Error(
+          'мост Tauri не внедрён в страницу (withGlobalTauri в tauri.conf.json)'
+        );
+      }
+      info = await bridge.core.invoke('identity');
+    } catch (err) {
+      // Отказ бэкенда не должен оставлять экран с прочерками без
+      // объяснения: человек решит, что программа сломалась молча.
+      const note = $('limitation');
+      note.hidden = false;
+      note.innerHTML = '<b>Не удалось получить состояние машины.</b> ' + err;
+      $('own-id').textContent = 'недоступен';
+      $('own-pw').textContent = '—';
+      return;
+    }
+
+    $('own-id').textContent = info.id;
+    $('own-pw').textContent = info.password;
+
+    // Состояние машины: хост или только просмотр. Врать нельзя —
+    // «готов принимать» на машине без захвата означает, что человек
+    // продиктует свой ID и будет ждать подключения, которого не будет.
+    $('ready').hidden = !info.can_host;
+    $('not-ready').hidden = info.can_host;
+
+    if (info.limitation) {
+      const note = $('limitation');
+      note.hidden = false;
+      note.innerHTML = '<b>Ограничение этой машины.</b> ' + info.limitation;
+    }
+  }
+
+  /** Копирование своего ID. */
+  $('copy').addEventListener('click', async () => {
+    const btn = $('copy');
+    const id = $('own-id').textContent.trim();
+    if (!/^\d/.test(id)) return;   // копировать нечего: ID не получен
+    try {
+      await navigator.clipboard.writeText(id);
+      // Подтверждение действия словом, а не значком: «Скопировано»
+      // читается сразу, галочка требует догадки.
+      btn.textContent = 'Скопировано';
+      setTimeout(() => { btn.textContent = 'Копировать'; }, 1400);
+    } catch {
+      btn.textContent = 'Не вышло';
+      setTimeout(() => { btn.textContent = 'Копировать'; }, 1400);
+    }
+  });
+
+  /** Поле ID: только цифры, группировка по три при вводе. */
+  $('peer-id').addEventListener('input', (e) => {
+    const digits = e.target.value.replace(/\D/g, '').slice(0, 9);
+    const groups = digits.match(/.{1,3}/g);
+    e.target.value = groups ? groups.join(' ') : '';
+
+    // Кнопка включается ровно когда ID полон. Это единственная
+    // подсказка о том, сколько цифр нужно, — и она честнее счётчика.
+    //
+    // Сейчас всё равно отключена: соединения нет до этапа 4, и
+    // включать кнопку, которая ничего не делает, значило бы соврать.
+    $('connect').disabled = true;
+  });
+
+  load();
+</script>
+
+</body>
+</html>

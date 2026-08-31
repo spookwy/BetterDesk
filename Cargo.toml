@@ -12,6 +12,7 @@ members = [
     "crates/bd-host",
     "crates/bd-client",
     "crates/bd-bench",
+    "ui/src-tauri",
 ]
 
 [workspace.package]

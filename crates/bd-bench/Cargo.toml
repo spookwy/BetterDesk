@@ -67,3 +67,4 @@ path = "src/bin/machine_probe.rs"
 [[bin]]
 name = "mfenc_probe"
 path = "src/bin/mfenc_probe.rs"
+

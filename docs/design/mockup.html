@@ -50,51 +50,12 @@
     --ease: cubic-bezier(0.2, 0, 0.2, 1);
   }
 
-  /* Тёмная тема заведена сразу — §6.2: добавлять её потом
-     в разбросанные хардкод-цвета дороже в разы. Токены те же,
-     значения другие; ни один компонент ниже не меняется. */
-  @media (prefers-color-scheme: dark) {
-    :root:not([data-theme="light"]) {
-      --bg:            #16181C;
-      --surface:       #1E2126;
-      --surface-sunk:  #24272D;
-      --text:          #ECEDEF;
-      --text-muted:    #A2A9B5;
-      --text-faint:    #767D89;
-      --border:        #2E323A;
-      --border-strong: #3C414B;
-      --accent:        #5B8FF0;
-      --accent-hover:  #7BA6F4;
-      --accent-sunk:   #1B2740;
-      --ok:            #4CAF7D;
-      --ok-sunk:       #16281F;
-      --warn:          #D99B3C;
-      --warn-sunk:     #2B2114;
-      --danger:        #E06B5D;
-      --shadow:        0 1px 3px rgba(0, 0, 0, 0.36);
-      --shadow-lift:   0 4px 12px rgba(0, 0, 0, 0.44);
-    }
-  }
-  :root[data-theme="dark"] {
-    --bg:            #16181C;
-    --surface:       #1E2126;
-    --surface-sunk:  #24272D;
-    --text:          #ECEDEF;
-    --text-muted:    #A2A9B5;
-    --text-faint:    #767D89;
-    --border:        #2E323A;
-    --border-strong: #3C414B;
-    --accent:        #5B8FF0;
-    --accent-hover:  #7BA6F4;
-    --accent-sunk:   #1B2740;
-    --ok:            #4CAF7D;
-    --ok-sunk:       #16281F;
-    --warn:          #D99B3C;
-    --warn-sunk:     #2B2114;
-    --danger:        #E06B5D;
-    --shadow:        0 1px 3px rgba(0, 0, 0, 0.36);
-    --shadow-lift:   0 4px 12px rgba(0, 0, 0, 0.44);
-  }
+  /* Тёмной темы нет — решение от 2026-08-31: продукт светлый.
+     Токены при этом обязательны (§6.2): они нужны не ради второй
+     темы, а ради того, чтобы цвет имел одно место жительства.
+     color-scheme задана явно, иначе тёмная тема Windows
+     перекрасит поля ввода и скроллбары. */
+  :root { color-scheme: light; }
 
   * { box-sizing: border-box; }
 
@@ -428,7 +389,7 @@
       пока не закрыт этап 3. Здесь решается только то, как оно выглядит, —
       чтобы на этапе 7 не изобретать это заново и не разносить цвета по файлам.
     </p>
-    <div class="ref">Светлая и тёмная темы переключаются вместе с темой системы.</div>
+    <div class="ref">Тема одна — светлая. Тёмной нет намеренно: см. docs/design/README.md</div>
   </header>
 
   <section class="section">

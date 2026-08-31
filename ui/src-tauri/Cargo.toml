@@ -1,0 +1,27 @@
+[package]
+name = "bd-shell"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "BetterDesk: оболочка (главный экран)"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+bd-core.workspace = true
+# Только ради проверки «годится ли машина в хосты» — захвата
+# оболочка не делает, кадры через неё не идут (§6.1).
+bd-capture.workspace = true
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[features]
+# Пустая фича по умолчанию: Tauri требует её наличия для custom-protocol
+# в релизной сборке.
+custom-protocol = ["tauri/custom-protocol"]
