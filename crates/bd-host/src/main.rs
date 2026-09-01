@@ -178,6 +178,7 @@ mod run {
         // они шли бы в энкодер. При CBR битрейт делится на фактическое
         // число кадров, и каждому достаётся втрое меньше бит: это
         // видно глазом как пикселизация (находка 30).
+        let fec_policy = parse_fec();
         let fps_limit = parse_fps().unwrap_or(60);
         let mut limiter = FrameLimiter::new(fps_limit);
         if fps_limit > 0 {
@@ -364,6 +365,24 @@ mod run {
             None => QuicTransport::host(bind, ACCEPT_TIMEOUT, epoch)?,
         };
         println!("Клиент подключился.\n");
+
+        // Избыточность (FEC) задаёт ОТПРАВИТЕЛЬ.
+        //
+        // Клиенту флага не нужно: паритет приходит в потоке, и
+        // сборщик пользуется им сам. Спрашивать его у обеих сторон
+        // значило бы завести настройку, которую можно рассогласовать.
+        //
+        // По умолчанию выключено: избыточность стоит трафика всегда,
+        // а спасает только при потерях (тот же размен, что у
+        // джиттер-буфера — находка 42). Через интернет включать
+        // стоит: при 3 % потерь без неё пропадает 39 % кадров.
+        session.set_fec(fec_policy);
+        if fec_policy.is_on() {
+            println!(
+                "FEC включён: +{} % избыточности к видео",
+                fec_policy.redundancy_percent()
+            );
+        }
 
         // Авторизация ДО первого кадра.
         //
@@ -951,6 +970,8 @@ mod run {
         println!("  --no-signaling       работать только по прямому адресу");
         println!("  --monitor N          какой экран отдавать (по умолчанию основной)");
         println!("  --fps N              предел частоты кодирования (по умолчанию 60)");
+        println!("  --fec [ПРОЦЕНТ]      защита от потерь (по умолчанию выкл.,");
+        println!("                       с флагом 20 %). Через интернет — нужна");
         println!("  --inject-input       применять ввод клиента (по умолчанию НЕТ)");
         println!("  --seconds N          завершиться через N с (для замеров)");
         println!();
@@ -988,6 +1009,23 @@ mod run {
 
     fn parse_seconds() -> Option<u64> {
         parse_arg("--seconds").and_then(|v| v.parse().ok())
+    }
+
+    /// Разобрать `--fec` или `--fec ПРОЦЕНТ`.
+    ///
+    /// Без значения берётся умолчание из `bd-transport` (20 %),
+    /// подобранное по арифметике потерь, а не на глаз. Явный процент
+    /// нужен, чтобы крутить размен «трафик против потерь» на живом
+    /// канале, — до появления автоматики этапа 6 это делается руками.
+    fn parse_fec() -> bd_transport::FecPolicy {
+        match parse_arg("--fec").and_then(|v| v.parse::<u32>().ok()) {
+            Some(0) => bd_transport::FecPolicy::Off,
+            Some(p) => bd_transport::FecPolicy::Fixed(p),
+            None if parse_flag("--fec") => {
+                bd_transport::FecPolicy::Fixed(bd_transport::DEFAULT_REDUNDANCY_PERCENT)
+            }
+            None => bd_transport::FecPolicy::Off,
+        }
     }
 
     fn parse_fps() -> Option<u32> {

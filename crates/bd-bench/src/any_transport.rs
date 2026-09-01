@@ -142,17 +142,15 @@ impl AnyTransport {
 
     /// Задать политику избыточности (FEC).
     ///
-    /// У QUIC пока не поддержано: замер эффекта FEC делается на
-    /// заглушке, где потери вносятся воспроизводимо. Молча ничего не
-    /// делать здесь нельзя — вызывающий решил бы, что FEC включён.
+    /// Поддержана обоими транспортами. Возвращает `true` всегда —
+    /// сигнатура сохранена от версии, где QUIC ещё не умел FEC и
+    /// вызывающий обязан был об этом сообщить.
     pub fn set_fec(&mut self, fec: bd_transport::FecPolicy) -> bool {
         match self {
-            Self::Loopback(t) => {
-                t.set_fec(fec);
-                true
-            }
-            Self::Quic(_) => false,
+            Self::Loopback(t) => t.set_fec(fec),
+            Self::Quic(t) => t.set_fec(fec),
         }
+        true
     }
 
     /// Сколько кадров собрано благодаря FEC.
@@ -162,11 +160,16 @@ impl AnyTransport {
     pub fn recovered_frames(&self) -> u64 {
         match self {
             Self::Loopback(t) => t.recovered_frames(),
-            Self::Quic(_) => 0,
+            Self::Quic(t) => t.recovered_frames(),
         }
     }
 
     /// Кадров выброшено при живом паритете — диагностика FEC.
+    ///
+    /// У QUIC не проброшено: счётчик живёт в сборщике сетевого
+    /// потока, а нужен он был для разбора конкретного дефекта
+    /// (паритет в хвосте кадра), который уже устранён. Ноль здесь
+    /// означает «не измеряется», а не «не случалось».
     pub fn evicted_with_parity(&self) -> u64 {
         match self {
             Self::Loopback(t) => t.evicted_with_parity(),

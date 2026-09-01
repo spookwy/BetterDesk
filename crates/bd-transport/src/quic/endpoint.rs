@@ -99,6 +99,16 @@ struct SharedStats {
     rtt_micros: AtomicU64,
     /// Живо ли соединение.
     connected: AtomicBool,
+    /// Кадров собрано благодаря FEC.
+    recovered_frames: AtomicU64,
+    /// Избыточность FEC в процентах; ноль — выключено.
+    ///
+    /// Атомик, а не поле в структуре потока: политика задаётся
+    /// снаружи (в идеале — контроллером качества этапа 6, который
+    /// будет менять её по измеренным потерям), а читается в сетевом
+    /// потоке на каждый кадр. Канал сюда не годится — он вносил бы
+    /// задержку между решением и его применением.
+    fec_percent: AtomicU64,
 }
 
 /// Транспорт поверх QUIC.
@@ -521,6 +531,37 @@ impl QuicTransport {
         }
     }
 
+    /// Задать политику избыточности (FEC).
+    ///
+    /// Применяется к следующему же кадру: сетевой поток читает
+    /// значение на каждой отправке. Это сделано ради этапа 6, где
+    /// контроллер качества будет менять избыточность по измеренным
+    /// потерям, — а не только ради флага при запуске.
+    ///
+    /// Действует **только на видео**: ввод и курсор идут в один-два
+    /// фрагмента, и там паритет стоил бы дороже, чем спасал.
+    pub fn set_fec(&self, fec: crate::fec::FecPolicy) {
+        self.stats
+            .fec_percent
+            .store(fec.redundancy_percent() as u64, Ordering::Relaxed);
+    }
+
+    /// Текущая политика избыточности.
+    pub fn fec(&self) -> crate::fec::FecPolicy {
+        match self.stats.fec_percent.load(Ordering::Relaxed) {
+            0 => crate::fec::FecPolicy::Off,
+            p => crate::fec::FecPolicy::Fixed(p as u32),
+        }
+    }
+
+    /// Сколько кадров собрано благодаря FEC.
+    ///
+    /// Ноль при включённом FEC и ненулевых потерях означает, что
+    /// избыточности не хватает, — а не что всё хорошо (находка 26).
+    pub fn recovered_frames(&self) -> u64 {
+        self.stats.recovered_frames.load(Ordering::Relaxed)
+    }
+
     /// Круговое время, измеренное QUIC.
     ///
     /// Настоящий RTT соединения, а не наша оценка: quinn считает его
@@ -696,6 +737,12 @@ async fn pump(
                                 stats
                                     .frames_lost
                                     .store(reassembler.lost_frames(), Ordering::Relaxed);
+                                // Без этого счётчика «FEC включён»
+                                // неотличимо от «FEC работает»
+                                // (находки 26 и 52).
+                                stats
+                                    .recovered_frames
+                                    .store(reassembler.recovered_frames(), Ordering::Relaxed);
 
                                 // Полная очередь означает, что пайплайн
                                 // не забирает кадры. Ждать нельзя —
@@ -754,12 +801,29 @@ async fn pump(
                 // решил бы, что кадры пропали, и запрашивал бы
                 // ключевой без повода. Расхождение тихое: пока
                 // ничего не отбрасывается, номера совпадают.
-                let result = fragmenter.fragment(
+                // Избыточность применяется только к видео.
+                //
+                // Ввод и курсор идут в один-два фрагмента, где паритет
+                // означал бы удвоение трафика ради защиты от потери,
+                // которую и так лечит переотправка состояния (§5.3).
+                // Видео же не переспрашивается вовсе — там FEC
+                // единственный способ пережить потерю.
+                let fec = if frame.kind == PayloadKind::Video {
+                    match stats.fec_percent.load(Ordering::Relaxed) {
+                        0 => crate::fec::FecPolicy::Off,
+                        p => crate::fec::FecPolicy::Fixed(p as u32),
+                    }
+                } else {
+                    crate::fec::FecPolicy::Off
+                };
+
+                let result = fragmenter.fragment_with_fec(
                     frame.kind,
                     frame.sequence,
                     frame.keyframe,
                     frame.captured_at_micros,
                     &frame.data,
+                    fec,
                     |datagram| {
                         match connection.send_datagram(datagram.to_vec().into()) {
                             Ok(()) => {
