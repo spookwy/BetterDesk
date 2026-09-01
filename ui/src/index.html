@@ -500,6 +500,7 @@
     </div>
     <div class="connect-row">
       <button class="btn" id="stop" type="button">Завершить</button>
+      <button class="btn" id="copy-log" type="button">Копировать лог</button>
       <span class="hint" style="margin:0" id="session-note"></span>
     </div>
     <pre class="log" id="session-log"></pre>
@@ -646,6 +647,27 @@
       await call('stop_session');
       refresh();
     } catch (err) { fail(err); }
+  });
+
+  /**
+   * Копирование журнала целиком.
+   *
+   * Существует ради одного сценария: человеку надо переслать, что
+   * произошло. Выделять мышью текст в прокручиваемом блоке неудобно,
+   * а половина журнала бесполезна — причина отказа обычно в первых
+   * строках, а итоги сессии в последних.
+   */
+  $('copy-log').addEventListener('click', async () => {
+    const btn = $('copy-log');
+    const text = $('session-log').textContent;
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      btn.textContent = 'Скопировано';
+    } catch {
+      btn.textContent = 'Не вышло';
+    }
+    setTimeout(() => { btn.textContent = 'Копировать лог'; }, 1400);
   });
 
   /**

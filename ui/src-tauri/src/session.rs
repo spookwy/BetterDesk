@@ -313,6 +313,28 @@ fn build_args(role: Role, options: &LaunchOptions) -> Vec<String> {
 /// один каталог, и искать его в системе означало бы запустить чужую
 /// версию, если она там окажется.
 fn binary_path(role: Role) -> Result<std::path::PathBuf, String> {
+    // Встроенный бинарь — первым.
+    //
+    // Раздаваемая сборка несёт сессию внутри себя (§7.1: один файл, а
+    // не папка из трёх), и распакованная копия заведомо той же версии,
+    // что оболочка. Файл рядом может оказаться чужим и старым —
+    // ровно та ловушка, на которой стоял сигналинг на VPS, где
+    // служба месяцами запускала бинарь, не обновлявшийся вместе с
+    // кодом.
+    let embedded_kind = match role {
+        Role::Host => crate::embedded::Binary::Host,
+        Role::Client => crate::embedded::Binary::Client,
+    };
+    if crate::embedded::is_embedded() {
+        match crate::embedded::ensure_unpacked(embedded_kind) {
+            Ok(path) => return Ok(path),
+            // Распаковка не удалась — не повод сдаваться: рядом
+            // может лежать рабочий файл. Но молчать нельзя, иначе
+            // причина потеряется.
+            Err(e) => tracing::warn!(%e, "не удалось распаковать встроенный бинарь"),
+        }
+    }
+
     let name = match role {
         Role::Host => "bd-host",
         Role::Client => "bd-client",
