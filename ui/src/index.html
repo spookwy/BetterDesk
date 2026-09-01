@@ -279,6 +279,106 @@
 
   /* Полоса «это ещё не работает». Отдельный вид: она сообщает не
      состояние машины, а незавершённость продукта. */
+  /* Подсказка под действием: тише основного текста, но читаемая. */
+  .hint {
+    margin-top: var(--s3);
+    font-size: var(--fs-small);
+    color: var(--text-muted);
+  }
+
+  /* Поле пароля уже поля ID: шесть цифр против девяти, и разная
+     ширина сама подсказывает, что куда. */
+  .field-pw {
+    max-width: 8rem;
+  }
+
+  /* Настройки свёрнуты по умолчанию: на первом экране их не должно
+     быть видно (§6.2 — никаких вкладок и меню на главном). */
+  .settings {
+    margin-top: var(--s4);
+  }
+  .settings > summary {
+    cursor: pointer;
+    font-size: var(--fs-small);
+    color: var(--text-muted);
+    padding: var(--s2) 0;
+    user-select: none;
+  }
+  .settings > summary:hover {
+    color: var(--text);
+  }
+  .settings-body {
+    display: flex;
+    flex-direction: column;
+    gap: var(--s4);
+    padding: var(--s4) 0 var(--s2);
+  }
+  .setting {
+    display: flex;
+    flex-direction: column;
+    gap: var(--s2);
+    font-size: var(--fs-small);
+  }
+  .setting.check {
+    flex-direction: row;
+    align-items: flex-start;
+    gap: var(--s3);
+    cursor: pointer;
+  }
+  .setting.check input {
+    margin-top: 2px;
+    flex: none;
+  }
+  .setting.check b {
+    display: block;
+    font-weight: 500;
+    color: var(--text);
+  }
+  /* Объяснение под настройкой: почему её стоит трогать. Без него
+     галочка «Защита от потерь» ничего не значит для человека. */
+  .setting.check i {
+    display: block;
+    margin-top: 2px;
+    font-style: normal;
+    color: var(--text-faint);
+  }
+
+  /* Точка состояния сессии. Цвет несёт смысл, поэтому рядом всегда
+     есть слово: цветом одним пользоваться нельзя. */
+  .dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    margin-left: var(--s2);
+    background: var(--text-faint);
+    vertical-align: middle;
+  }
+  .dot.live {
+    background: var(--ok);
+  }
+
+  /* Журнал сессии: то, что она печатает человеку. Моноширинный,
+     потому что там выровненные таблицы и цифры. */
+  .log {
+    margin: var(--s4) 0 0;
+    padding: var(--s4);
+    max-height: 14rem;
+    overflow-y: auto;
+    background: var(--surface-sunk);
+    border: 1px solid var(--border);
+    border-radius: var(--r-ctl);
+    font-family: var(--font-mono);
+    font-size: var(--fs-small);
+    line-height: 1.45;
+    color: var(--text-muted);
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .log:empty {
+    display: none;
+  }
+
   .unbuilt {
     display: flex;
     align-items: center;
@@ -343,24 +443,66 @@
     <div class="label">Подключиться к другому компьютеру</div>
     <div class="connect-row">
       <input class="field" id="peer-id" type="text" inputmode="numeric"
-             placeholder="Введите ID из девяти цифр"
+             placeholder="ID из девяти цифр"
              aria-label="ID удалённого компьютера" maxlength="11">
+      <input class="field field-pw" id="peer-pw" type="text" inputmode="numeric"
+             placeholder="Пароль"
+             aria-label="Пароль сессии" maxlength="6">
       <button class="btn btn-primary" id="connect" type="button" disabled>Подключиться</button>
     </div>
-    <div class="unbuilt">
-      <span>Соединение по ID появится вместе с сервером связи — этап 4. Сейчас кнопка не работает.</span>
-    </div>
+    <div class="hint">Оба числа продиктует тот, чей экран смотрите. Пароль меняется при каждом его запуске.</div>
   </section>
 
-  <!-- Сохранённые -->
+  <!-- Отдать свой экран -->
   <section class="block">
-    <div class="label">Сохранённые</div>
-    <div class="machines" id="machines">
-      <div class="empty">
-        <b>Пока пусто</b>
-        Компьютеры появятся здесь после первого подключения.
-      </div>
+    <div class="label">Отдать свой экран</div>
+    <div class="connect-row">
+      <button class="btn btn-primary" id="share" type="button">Принимать подключения</button>
+      <span class="hint" style="margin:0">Второй стороне понадобятся ваш ID и пароль сверху.</span>
     </div>
+
+    <details class="settings">
+      <summary>Настройки качества</summary>
+      <div class="settings-body">
+        <label class="setting">
+          <span>Качество</span>
+          <select class="field" id="quality">
+            <option value="low">Низкое — для узкого канала</option>
+            <option value="medium" selected>Обычное</option>
+            <option value="high">Высокое — для локальной сети</option>
+          </select>
+        </label>
+
+        <label class="setting check">
+          <input type="checkbox" id="fec" checked>
+          <span>
+            <b>Защита от потерь</b>
+            <i>Добавляет 20 % трафика, но через интернет спасает картинку. При потерях 3 % без неё пропадает 39 % кадров.</i>
+          </span>
+        </label>
+
+        <label class="setting check">
+          <input type="checkbox" id="allow-input">
+          <span>
+            <b>Разрешить управление</b>
+            <i>Вторая сторона сможет двигать мышь и печатать на этом компьютере. Аутентификации устройств пока нет — включайте только для тех, кому доверяете.</i>
+          </span>
+        </label>
+      </div>
+    </details>
+  </section>
+
+  <!-- Текущая сессия -->
+  <section class="block" id="session-block" hidden>
+    <div class="label">
+      <span id="session-title">Сессия</span>
+      <span class="dot" id="session-dot"></span>
+    </div>
+    <div class="connect-row">
+      <button class="btn" id="stop" type="button">Завершить</button>
+      <span class="hint" style="margin:0" id="session-note"></span>
+    </div>
+    <pre class="log" id="session-log"></pre>
   </section>
 
   <div class="foot" id="foot">BetterDesk 0.1.0</div>
@@ -444,13 +586,112 @@
 
     // Кнопка включается ровно когда ID полон. Это единственная
     // подсказка о том, сколько цифр нужно, — и она честнее счётчика.
-    //
-    // Сейчас всё равно отключена: соединения нет до этапа 4, и
-    // включать кнопку, которая ничего не делает, значило бы соврать.
-    $('connect').disabled = true;
+    $('connect').disabled = digits.length !== 9;
   });
 
+  /** Поле пароля: шесть цифр, без группировки. */
+  $('peer-pw').addEventListener('input', (e) => {
+    e.target.value = e.target.value.replace(/\D/g, '').slice(0, 6);
+  });
+
+  /**
+   * Позвать бэкенд.
+   *
+   * Мост берётся ВНУТРИ try: обращение к `window.__TAURI__.core`
+   * кидает при разборе, если мост не внедрён, и обработчик снаружи
+   * оказался бы недостижим — ровно дефект первого запуска оболочки.
+   */
+  async function call(cmd, args) {
+    const bridge = window.__TAURI__;
+    if (!bridge || !bridge.core) throw new Error('мост Tauri недоступен');
+    return bridge.core.invoke(cmd, args);
+  }
+
+  /** Показать отказ рядом с действием, а не в консоли. */
+  function fail(text) {
+    const note = $('limitation');
+    note.hidden = false;
+    note.innerHTML = '<b>Не вышло.</b> ' + String(text).replace(/\n/g, '<br>');
+  }
+
+  /** Настройки качества с экрана. */
+  function options() {
+    return {
+      peerId: $('peer-id').value,
+      password: $('peer-pw').value,
+      quality: $('quality').value,
+      fec: $('fec').checked,
+      allowInput: $('allow-input').checked,
+    };
+  }
+
+  $('connect').addEventListener('click', async () => {
+    $('limitation').hidden = true;
+    try {
+      await call('start_client', { options: options() });
+      refresh();
+    } catch (err) { fail(err); }
+  });
+
+  $('share').addEventListener('click', async () => {
+    $('limitation').hidden = true;
+    try {
+      await call('start_host', { options: options() });
+      refresh();
+    } catch (err) { fail(err); }
+  });
+
+  $('stop').addEventListener('click', async () => {
+    try {
+      await call('stop_session');
+      refresh();
+    } catch (err) { fail(err); }
+  });
+
+  /**
+   * Опрос состояния сессии.
+   *
+   * Раз в секунду, а не подписка: состояние меняется редко и
+   * помещается в одно сообщение целиком. Подписка потребовала бы
+   * держать канал и разбираться с его обрывом — сложность, которой
+   * нечего окупить.
+   */
+  async function refresh() {
+    let st;
+    try {
+      st = await call('session_status');
+    } catch {
+      return;   // мост отвалился — сообщать не о чем, экран уже мёртв
+    }
+
+    const block = $('session-block');
+    const hasSomething = st.running || (st.log && st.log.length);
+    block.hidden = !hasSomething;
+
+    $('session-dot').classList.toggle('live', st.running);
+    $('session-title').textContent = st.running
+      ? (st.role === 'host' ? 'Отдаём экран' : 'Смотрим чужой экран')
+      : 'Сессия завершена';
+
+    // Кнопки блокируются на время сессии: вторая заняла бы тот же
+    // порт и отвалилась бы с невнятной ошибкой.
+    $('stop').disabled = !st.running;
+    $('share').disabled = st.running;
+    $('connect').disabled = st.running
+      || $('peer-id').value.replace(/\D/g, '').length !== 9;
+
+    $('session-note').textContent = st.exitNote || '';
+    $('session-log').textContent = (st.log || []).join('\n');
+
+    // Прокрутка к последней строке: человек смотрит на то, что
+    // произошло только что, а не на начало журнала.
+    const log = $('session-log');
+    log.scrollTop = log.scrollHeight;
+  }
+
   load();
+  refresh();
+  setInterval(refresh, 1000);
 </script>
 
 </body>

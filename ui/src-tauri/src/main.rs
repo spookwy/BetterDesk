@@ -36,6 +36,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 #![forbid(unsafe_code)]
 
+mod session;
+
 use serde::Serialize;
 use std::sync::Mutex;
 
@@ -210,6 +212,40 @@ fn session_password() -> String {
     out
 }
 
+/// Запустить сессию хостом: отдать свой экран.
+#[tauri::command]
+fn start_host(
+    sessions: tauri::State<'_, session::Sessions>,
+    options: session::LaunchOptions,
+) -> Result<(), String> {
+    sessions.start(session::Role::Host, &options)
+}
+
+/// Запустить сессию клиентом: смотреть чужой экран.
+#[tauri::command]
+fn start_client(
+    sessions: tauri::State<'_, session::Sessions>,
+    options: session::LaunchOptions,
+) -> Result<(), String> {
+    sessions.start(session::Role::Client, &options)
+}
+
+/// Завершить текущую сессию.
+#[tauri::command]
+fn stop_session(sessions: tauri::State<'_, session::Sessions>) -> Result<(), String> {
+    sessions.stop()
+}
+
+/// Состояние сессии для экрана.
+///
+/// Экран опрашивает его раз в секунду. Опрос, а не события: состояние
+/// меняется редко и целиком помещается в одно сообщение, а подписка
+/// потребовала бы держать канал и разбираться с его обрывом.
+#[tauri::command]
+fn session_status(sessions: tauri::State<'_, session::Sessions>) -> session::SessionStatus {
+    sessions.status()
+}
+
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -226,7 +262,14 @@ fn main() {
 
     tauri::Builder::default()
         .manage(Mutex::new(machine))
-        .invoke_handler(tauri::generate_handler![identity])
+        .manage(session::Sessions::new())
+        .invoke_handler(tauri::generate_handler![
+            identity,
+            start_host,
+            start_client,
+            stop_session,
+            session_status
+        ])
         .run(tauri::generate_context!())
         .expect("не удалось запустить окно оболочки");
 }
