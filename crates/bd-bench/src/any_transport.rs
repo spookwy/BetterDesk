@@ -140,6 +140,40 @@ impl AnyTransport {
         }
     }
 
+    /// Задать политику избыточности (FEC).
+    ///
+    /// У QUIC пока не поддержано: замер эффекта FEC делается на
+    /// заглушке, где потери вносятся воспроизводимо. Молча ничего не
+    /// делать здесь нельзя — вызывающий решил бы, что FEC включён.
+    pub fn set_fec(&mut self, fec: bd_transport::FecPolicy) -> bool {
+        match self {
+            Self::Loopback(t) => {
+                t.set_fec(fec);
+                true
+            }
+            Self::Quic(_) => false,
+        }
+    }
+
+    /// Сколько кадров собрано благодаря FEC.
+    ///
+    /// Ноль при включённом FEC и ненулевых потерях означает, что
+    /// избыточности не хватает, — а не что всё хорошо (находка 26).
+    pub fn recovered_frames(&self) -> u64 {
+        match self {
+            Self::Loopback(t) => t.recovered_frames(),
+            Self::Quic(_) => 0,
+        }
+    }
+
+    /// Кадров выброшено при живом паритете — диагностика FEC.
+    pub fn evicted_with_parity(&self) -> u64 {
+        match self {
+            Self::Loopback(t) => t.evicted_with_parity(),
+            Self::Quic(_) => 0,
+        }
+    }
+
     /// Название для отчёта.
     pub fn label(&self) -> &'static str {
         match self {

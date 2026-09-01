@@ -58,6 +58,24 @@ pub const HEADER_SIZE: usize = 24;
 /// Флаг: фрагмент принадлежит ключевому кадру.
 const FLAG_KEYFRAME: u16 = 1 << 0;
 
+/// Сдвиг поля «число паритетных фрагментов» внутри флагов.
+///
+/// # Почему число паритетных едет во флагах, а не отдельным полем
+///
+/// Заголовок уже 24 байта при полезной нагрузке 1176, и каждый
+/// лишний байт умножается на число фрагментов. Свободных бит во
+/// флагах было пятнадцать, а нужно восемь: `MAX_PARITY` равен 255
+/// именно поэтому, а не наоборот.
+///
+/// Значение приходит из сети и **не является доверенным**: сборщик
+/// обязан проверить, что паритетных не больше, чем всего фрагментов.
+/// Иначе пакет от постороннего заставил бы вычислить отрицательное
+/// число кусков данных.
+const PARITY_SHIFT: u16 = 8;
+
+/// Маска поля «число паритетных фрагментов» после сдвига.
+const PARITY_MASK: u16 = 0xFF;
+
 /// Вид полезной нагрузки.
 ///
 /// Транспорт не парсит содержимое (CLAUDE.md §4.2.4) — вид нужен
@@ -165,9 +183,29 @@ pub struct FragmentHeader {
     /// часов, а не задержка. Смещение оценивает приёмник
     /// (см. `bd_core::time::ClockSync`).
     pub captured_at_micros: u64,
+    /// Сколько из `count` фрагментов — паритетные (FEC).
+    ///
+    /// Ноль означает «без избыточности». Паритетные всегда идут
+    /// последними: индексы `count - parity .. count`. Такой порядок
+    /// позволяет приёмнику отделить данные от паритета, не заводя
+    /// второго поля с их началом.
+    pub parity: u8,
 }
 
 impl FragmentHeader {
+    /// Сколько фрагментов кадра несут собственно данные.
+    ///
+    /// Инвариант `parity <= count` обеспечивается разбором, поэтому
+    /// вычитание здесь не может уйти в минус.
+    pub fn data_count(&self) -> u16 {
+        self.count.saturating_sub(self.parity as u16)
+    }
+
+    /// Паритетный ли это фрагмент.
+    pub fn is_parity(&self) -> bool {
+        self.index >= self.data_count()
+    }
+
     /// Записать заголовок в начало буфера.
     ///
     /// Буфер должен быть не короче [`HEADER_SIZE`].
@@ -175,7 +213,8 @@ impl FragmentHeader {
         if out.len() < HEADER_SIZE {
             return Err(TransportError::Malformed("буфер короче заголовка"));
         }
-        let flags = if self.keyframe { FLAG_KEYFRAME } else { 0 };
+        let mut flags = if self.keyframe { FLAG_KEYFRAME } else { 0 };
+        flags |= (self.parity as u16 & PARITY_MASK) << PARITY_SHIFT;
 
         out[0] = PROTOCOL_VERSION;
         out[1] = self.kind.code();
@@ -246,6 +285,17 @@ impl FragmentHeader {
             return Err(TransportError::Malformed("индекс вне диапазона"));
         }
 
+        // Число паритетных приходит из сети и доверия не заслуживает.
+        // Без этой проверки `data_count()` дал бы ноль на пакете, где
+        // паритетных объявлено больше, чем фрагментов, — и сборщик
+        // ждал бы кадр, состоящий из одного паритета, вечно.
+        let parity = ((flags >> PARITY_SHIFT) & PARITY_MASK) as u8;
+        if parity as u16 >= count {
+            return Err(TransportError::Malformed(
+                "паритетных не меньше, чем всего фрагментов",
+            ));
+        }
+
         let header = Self {
             kind,
             sequence,
@@ -253,6 +303,7 @@ impl FragmentHeader {
             count,
             keyframe: flags & FLAG_KEYFRAME != 0,
             captured_at_micros,
+            parity,
         };
         Ok((header, &datagram[HEADER_SIZE..]))
     }
@@ -272,6 +323,7 @@ mod tests {
             // Значение с единицами во всех байтах: сдвиг или обрезка
             // при записи изменили бы его заметно, а круглое число
             // такую ошибку могло бы пережить.
+            parity: 2,
             captured_at_micros: 0x1122_3344_5566_7788,
         }
     }

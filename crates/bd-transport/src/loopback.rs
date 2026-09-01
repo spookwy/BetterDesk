@@ -24,6 +24,7 @@
 //! неизвестна (CLAUDE.md §0.1, находка 26).
 
 use crate::error::{Result, TransportError};
+use crate::fec::FecPolicy;
 use crate::fragment::{Fragmenter, ReassembledFrame, Reassembler, ReceiveOutcome};
 use crate::packet::PayloadKind;
 use bd_core::metrics::{FrameTimings, Stage};
@@ -161,6 +162,12 @@ pub struct LoopbackTransport {
     /// Свой xorshift, а не `rand`: одна зависимость меньше, а качество
     /// случайности здесь роли не играет — нужна воспроизводимость.
     rng: u64,
+    /// Политика избыточности (FEC).
+    ///
+    /// Живёт в транспорте, а не в вызывающем: избыточность — свойство
+    /// канала, а не кадра, и решать её на каждый `send` значило бы
+    /// раздать это знание всем вызывающим.
+    fec: FecPolicy,
 }
 
 impl LoopbackTransport {
@@ -181,6 +188,9 @@ impl LoopbackTransport {
             stats: TransportStats::default(),
             sequence: Vec::new(),
             rng: 0x9E37_79B9_7F4A_7C15,
+            // По умолчанию выключено: избыточность стоит трафика
+            // всегда, а спасает только при потерях (см. `FecPolicy`).
+            fec: FecPolicy::Off,
         }
     }
 
@@ -197,6 +207,26 @@ impl LoopbackTransport {
     /// Сменить профиль канала на лету.
     pub fn set_profile(&mut self, profile: LinkProfile) {
         self.profile = profile;
+    }
+
+    /// Текущая политика избыточности.
+    pub fn fec(&self) -> FecPolicy {
+        self.fec
+    }
+
+    /// Задать политику избыточности.
+    pub fn set_fec(&mut self, fec: FecPolicy) {
+        self.fec = fec;
+    }
+
+    /// Сколько кадров собрано благодаря FEC.
+    pub fn recovered_frames(&self) -> u64 {
+        self.reassembler.recovered_frames()
+    }
+
+    /// Кадров выброшено при живом паритете — диагностика FEC.
+    pub fn evicted_with_parity(&self) -> u64 {
+        self.reassembler.evicted_with_parity()
     }
 
     /// Отправить кадр.
@@ -252,8 +282,27 @@ impl LoopbackTransport {
         // это учитывать и не считать по ним задержку.
         let captured_at = timings.get(Stage::Captured).map_or(0, |t| t.as_micros());
 
-        self.fragmenter
-            .fragment(kind, sequence, keyframe, captured_at, data, |datagram| {
+        // FEC применяется только к видео.
+        //
+        // Ввод и курсор идут пакетами в один-два фрагмента, где
+        // избыточность означала бы удвоение трафика ради защиты от
+        // потери, которую и так лечит переотправка состояния (§5.3).
+        // Видео же не переспрашивается вовсе — там FEC единственный
+        // способ пережить потерю.
+        let fec = if kind == PayloadKind::Video {
+            self.fec
+        } else {
+            FecPolicy::Off
+        };
+
+        self.fragmenter.fragment_with_fec(
+            kind,
+            sequence,
+            keyframe,
+            captured_at,
+            data,
+            fec,
+            |datagram| {
                 sent += 1;
                 bytes += datagram.len() as u64;
 
@@ -274,7 +323,8 @@ impl LoopbackTransport {
                     bytes: datagram.to_vec(),
                 });
                 Ok(())
-            })?;
+            },
+        )?;
 
         self.rng = rng;
         self.stats.frames_sent += 1;

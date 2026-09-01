@@ -30,6 +30,7 @@
 
 pub mod discovery;
 pub mod error;
+pub mod fec;
 pub mod fragment;
 pub mod jitter;
 pub mod loopback;
@@ -39,6 +40,7 @@ pub mod quic;
 
 pub use discovery::{SignalEvent, Signaling};
 pub use error::{Result, TransportError};
+pub use fec::{FecPolicy, DEFAULT_REDUNDANCY_PERCENT};
 pub use fragment::{
     DropReason, Fragmenter, ReassembledFrame, Reassembler, ReceiveOutcome, DEFAULT_MAX_PAYLOAD,
     MAX_FRAGMENTS,
