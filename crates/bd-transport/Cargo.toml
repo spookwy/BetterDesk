@@ -16,3 +16,4 @@ tokio-tungstenite.workspace = true
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 thiserror.workspace = true
 tracing.workspace = true
+reed-solomon-simd = "3.1.0"
