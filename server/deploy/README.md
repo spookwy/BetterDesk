@@ -185,12 +185,28 @@ pub const DEFAULT_SIGNALING: &str = "ws://ВАШ_IP:9000/ws";
 
 ## Обновление сервера
 
+**Копировать бинарь обязательно.** Служба запускает
+`/opt/betterdesk/bd-signaling`, а `cargo build` кладёт результат в
+`target/release/`. Без `cp` пересборка ничего не меняет: служба
+продолжает крутить старый файл.
+
+Симптом обманчивый — сборка проходит, ошибок нет, `systemctl status`
+показывает «active (running)», а поведение прежнее. Именно так был
+потерян час при добавлении STUN: код собрался, но в журнале не
+появилось ни строки о нём.
+
+`stop` перед `cp`, а не `restart` после: работающий файл нельзя
+перезаписать, `cp` откажет с «Text file busy».
+
 ```bash
 cd ~/BetterDesk && git pull
 cd server && cargo build --release -p bd-signaling
 sudo systemctl stop bd-signaling
 sudo cp target/release/bd-signaling /opt/betterdesk/
 sudo systemctl start bd-signaling
+
+# Проверить, что поднялась НОВАЯ версия, а не прежняя:
+journalctl -u bd-signaling -n 20 --no-pager
 ```
 
 ## Смотреть журнал
