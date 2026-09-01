@@ -156,6 +156,7 @@ dependencies = [
  "bd-capture",
  "bd-codec",
  "bd-core",
+ "bd-crypto",
  "bd-input",
  "bd-render",
  "bd-transport",

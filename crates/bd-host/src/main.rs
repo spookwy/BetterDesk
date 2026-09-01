@@ -269,6 +269,31 @@ mod run {
         // `--no-password` оставлен для замеров: там сессий десятки за
         // час, и ввод пароля каждый раз мешал бы. Но это осознанное
         // снятие защиты, а не удобство по умолчанию.
+        // Ключ устройства — ДО всего остального.
+        //
+        // Он и есть ответ на вопрос «та ли это машина» (§7.3). Пароль
+        // доказывает, что подключающийся знает секрет; ключ
+        // доказывает, что экран отдаёт тот, кому этот секрет
+        // диктовали. Без него подставной хост принимал любой пароль.
+        //
+        // Отказ здесь фатален и не заминается: работать без личности
+        // значит оставить клиента без всякой возможности нас узнать,
+        // а он при этом увидел бы обычное подключение — то есть
+        // защита исчезла бы молча.
+        let identity = {
+            use bd_crypto::KeyStore as _;
+            let store =
+                bd_crypto::FileKeyStore::new(bd_core::device::data_dir().join("device.key"));
+            match store.load_or_create() {
+                Ok(identity) => identity,
+                Err(e) => {
+                    println!("❌ Ключ устройства недоступен: {e}");
+                    println!("   Без него клиент не сможет убедиться, что это ваша машина.");
+                    return Err(anyhow::anyhow!("ключ устройства недоступен"));
+                }
+            }
+        };
+
         let require_password = !parse_flag("--no-password");
         let session_password = if require_password {
             match bd_crypto::SessionPassword::generate() {
@@ -419,6 +444,19 @@ mod run {
             println!("Новый при каждом запуске. Диктовать вместе с ID.\n");
         }
 
+        // Отпечаток ключа — для сверки голосом при ПЕРВОМ подключении.
+        //
+        // Дальше он не нужен: клиент запомнит ключ и будет сличать
+        // сам, молча. Но первая встреча ничем не отличается от
+        // подмены — кроме как этой строкой, прочитанной вслух тем же
+        // звонком, которым диктуется пароль (TOFU, см. bd_crypto::pinning).
+        //
+        // Печатается всегда, а не только с сигналингом: способ
+        // подключения и опознание независимы. Ровно та ошибка, что
+        // была с паролем, — он показывался лишь в одной ветке.
+        println!("Отпечаток этой машины (сверить при первом подключении):");
+        println!("  {}\n", identity.public().fingerprint());
+
         println!("Жду клиента ({} с)...", ACCEPT_TIMEOUT.as_secs());
 
         // Если сигналинг есть — ждём, пока клиент объявится, и бьём
@@ -465,7 +503,7 @@ mod run {
         // передачи, посторонний увидел бы хотя бы один кадр — а этого
         // достаточно, чтобы прочесть, что открыто на экране.
         if let Some((_, checker)) = &session_password {
-            match authorize(&mut session, checker) {
+            match authorize(&mut session, checker, &identity) {
                 Ok(true) => println!("Пароль принят.\n"),
                 Ok(false) => {
                     println!("Подключение отклонено: пароль не подошёл.\n");
@@ -478,6 +516,21 @@ mod run {
             }
         } else {
             println!("⚠  Пароль ОТКЛЮЧЁН (--no-password): подключится кто угодно.\n");
+            // Но назваться мы обязаны и здесь.
+            //
+            // Опознание и пароль — РАЗНЫЕ вещи, и связывать их
+            // нельзя: клиент, однажды запомнивший эту машину, ждёт
+            // подписи при каждом подключении. Промолчи хост под
+            // `--no-password`, и клиент увидел бы «хост не назвался»
+            // — то есть замер бы точно так же, как при настоящей
+            // подмене, на ровном месте.
+            //
+            // Это та же ошибка, что дважды случалась с паролем:
+            // печать в одной ветке и молчание в другой (находка 64).
+            if let Err(e) = answer_identify(&mut session, &identity) {
+                println!("Соединение потеряно при опознании: {e}\n");
+                return Ok(());
+            }
         }
 
         // Инжект ввода по умолчанию ВЫКЛЮЧЕН.
@@ -953,9 +1006,74 @@ mod run {
     /// перебора: QUIC держит сессию, а хост отвечал бы быстро.
     /// Три попытки — и сессия рвётся; при следующем запуске хоста
     /// пароль уже другой.
+    /// Подписать присланный вызов и отправить ответ.
+    ///
+    /// Отдельная функция, потому что вызывается из **двух** мест:
+    /// из цикла авторизации и из ветки `--no-password`. Копии здесь
+    /// разошлись бы неизбежно — и разойдись они, опознание работало
+    /// бы только в одном режиме, а во втором клиент замирал бы, как
+    /// при настоящей подмене (находка 62).
+    fn sign_challenge(
+        session: &mut QuicTransport,
+        identity: &bd_crypto::DeviceIdentity,
+        challenge: &[u8],
+    ) -> anyhow::Result<()> {
+        use bd_core::auth::AuthResponse;
+
+        let mut timings = FrameTimings::default();
+        session
+            .send(
+                PayloadKind::Auth,
+                false,
+                AuthResponse::Identity {
+                    public_key: identity.public().to_bytes().to_vec(),
+                    signature: identity.sign(challenge).to_vec(),
+                }
+                .encode()
+                .as_bytes(),
+                &mut timings,
+            )
+            .map(|_frame_number| ())
+            .map_err(|e| anyhow::anyhow!("{e}"))
+    }
+
+    /// Дождаться вызова от клиента и назваться — для режима без пароля.
+    ///
+    /// Ждём недолго: клиент шлёт вызов сразу после соединения. Если
+    /// он этого не делает, значит перед нами старая версия — и она
+    /// просто пойдёт смотреть кадры, как раньше. Ронять сессию из-за
+    /// этого нельзя: опознание защищает клиента, и отказываться
+    /// работать с тем, кто им не пользуется, значит наказывать его
+    /// за нашу же новую возможность.
+    fn answer_identify(
+        session: &mut QuicTransport,
+        identity: &bd_crypto::DeviceIdentity,
+    ) -> anyhow::Result<()> {
+        use bd_core::auth::AuthRequest;
+
+        const IDENTIFY_WAIT: Duration = Duration::from_secs(3);
+
+        let mut timings = FrameTimings::default();
+        let frame = match session.receive_auth_timeout(IDENTIFY_WAIT, &mut timings) {
+            Ok(Some(frame)) => frame,
+            // Молчание — клиент старой версии. Не ошибка.
+            Ok(None) => return Ok(()),
+            Err(e) => return Err(anyhow::anyhow!("{e}")),
+        };
+
+        let Ok(text) = std::str::from_utf8(&frame.data) else {
+            return Ok(());
+        };
+        if let Some(AuthRequest::Identify { challenge }) = AuthRequest::parse(text) {
+            sign_challenge(session, identity, &challenge)?;
+        }
+        Ok(())
+    }
+
     fn authorize(
         session: &mut QuicTransport,
         checker: &bd_crypto::SessionPassword,
+        identity: &bd_crypto::DeviceIdentity,
     ) -> anyhow::Result<bool> {
         use bd_core::auth::{AuthRequest, AuthResponse, MAX_ATTEMPTS};
 
@@ -1003,8 +1121,29 @@ mod run {
             let Ok(text) = std::str::from_utf8(&delivered.data) else {
                 continue;
             };
-            let Some(AuthRequest::Password(attempt)) = AuthRequest::parse(text) else {
-                continue;
+            let attempt = match AuthRequest::parse(text) {
+                // «Назовись»: подписываем присланный вызов ключом
+                // устройства и отвечаем.
+                //
+                // # Почему это НЕ стоит попытки пароля
+                //
+                // Опознание — не проверка человека, а проверка
+                // машины, и оно должно быть возможно до всякого
+                // пароля: клиент обязан узнать, с кем говорит,
+                // ПРЕЖДЕ чем сообщать секрет. Считай мы это
+                // попыткой, честный клиент терял бы одну из трёх на
+                // ровном месте — та же ошибка, что была с зондом
+                // пустого пароля.
+                //
+                // Подписывается **присланный** вызов, а не что-то
+                // своё: подпись под собственными байтами повторил бы
+                // кто угодно, кто её однажды подслушал.
+                Some(AuthRequest::Identify { challenge }) => {
+                    sign_challenge(session, identity, &challenge)?;
+                    continue;
+                }
+                Some(AuthRequest::Password(attempt)) => attempt,
+                None => continue,
             };
 
             // Пустой пароль — это вопрос «а нужен ли пароль?», а не

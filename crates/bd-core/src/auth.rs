@@ -45,9 +45,46 @@ pub const MAX_AUTH_LEN: usize = 256;
 /// заново — а хост при каждом запуске выдаёт новый пароль.
 pub const MAX_ATTEMPTS: u8 = 3;
 
+/// Длина вызова в байтах.
+///
+/// # Зачем вызов вообще нужен
+///
+/// Без него хост мог бы прислать подпись, записанную заранее, — и
+/// её повторил бы кто угодно, кто её однажды подслушал (replay).
+/// Случайный вызов делает подпись годной ровно для одной сессии:
+/// подписывается то, чего атакующий не мог видеть.
+///
+/// Шестнадцать байт — 128 бит: повтор вызова не встретится за время
+/// жизни продукта, а сообщение остаётся коротким.
+pub const CHALLENGE_LEN: usize = 16;
+
+/// Длина публичного ключа Ed25519 в байтах.
+///
+/// Объявлена здесь, а не берётся из `bd-crypto`: `bd-core` не зависит
+/// от криптографии (§4.2.1) и описывает только то, что едет по
+/// проводу. Расхождение поймал бы тест `wire_sizes_match_ed25519`
+/// в `bd-crypto` — там, где обе величины видны сразу (находка 62 про
+/// разъехавшиеся копии).
+pub const PUBLIC_KEY_LEN: usize = 32;
+
+/// Длина подписи Ed25519 в байтах.
+pub const SIGNATURE_LEN: usize = 64;
+
 /// Сообщение авторизации от клиента к хосту.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthRequest {
+    /// «Назовись»: клиент шлёт случайный вызов, хост обязан подписать
+    /// его своим ключом устройства.
+    ///
+    /// Идёт **первым**, до пароля, и порядок здесь принципиален.
+    /// Пароль — секрет человека; отдавать его раньше, чем выяснено,
+    /// с кем разговариваем, значит сообщать его кому попало. Именно
+    /// в этом и состояла дыра: подставной хост принимал любой пароль.
+    Identify {
+        /// Случайные байты, которые хост подпишет.
+        challenge: [u8; CHALLENGE_LEN],
+    },
+
     /// «Вот пароль, пусти меня».
     Password(String),
 }
@@ -73,16 +110,59 @@ pub enum AuthResponse {
     /// нажал «отклонить». Смешивать их нельзя — человек на клиенте
     /// иначе будет заново вводить правильный пароль.
     Rejected,
+
+    /// Ответ на [`AuthRequest::Identify`]: ключ устройства и подпись
+    /// присланного вызова.
+    ///
+    /// Проверяется в `bd-crypto`, а не здесь: `bd-core` не зависит от
+    /// криптографии (§4.2.1), и это разделение полезно само по себе —
+    /// протокол описывает, что едет по проводу, а не кому верить.
+    Identity {
+        /// Публичный ключ устройства, 32 байта в hex.
+        public_key: Vec<u8>,
+        /// Подпись вызова этим ключом, 64 байта в hex.
+        signature: Vec<u8>,
+    },
 }
 
 /// Разделитель полей. Табуляция: в пароле её быть не может, а пробел
 /// теоретически может.
 const SEP: char = '\t';
 
+/// Перевести байты в шестнадцатеричную строку.
+///
+/// Протокол текстовый (см. шапку модуля), а ключи и подписи —
+/// двоичные. Hex, а не base64: он читается глазами в дампе и
+/// сверяется с отпечатком, который видит человек, — а отладка между
+/// двумя машинами и есть то, ради чего формат текстовый.
+fn to_hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
+
+/// Разобрать шестнадцатеричную строку заданной длины.
+///
+/// **Недоверенный ввод.** Длина проверяется до разбора: без этого
+/// посторонний прислал бы строку любого размера, и мы выделяли бы
+/// память по чужой команде (§8.5).
+fn from_hex(text: &str, expected_bytes: usize) -> Option<Vec<u8>> {
+    if text.len() != expected_bytes * 2 {
+        return None;
+    }
+    (0..text.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(text.get(i..i + 2)?, 16).ok())
+        .collect()
+}
+
 impl AuthRequest {
     /// Закодировать для отправки.
     pub fn encode(&self) -> String {
         match self {
+            Self::Identify { challenge } => format!("identify{SEP}{}", to_hex(challenge)),
             Self::Password(p) => format!("auth{SEP}{p}"),
         }
     }
@@ -97,6 +177,15 @@ impl AuthRequest {
         }
         let mut parts = input.split(SEP);
         match parts.next()? {
+            "identify" => {
+                let challenge = from_hex(parts.next()?, CHALLENGE_LEN)?;
+                if parts.next().is_some() {
+                    return None;
+                }
+                Some(Self::Identify {
+                    challenge: challenge.try_into().ok()?,
+                })
+            }
             "auth" => {
                 let password = parts.next()?;
                 // Лишние поля — другая версия протокола или подделка.
@@ -117,6 +206,14 @@ impl AuthResponse {
             Self::Granted => "granted".to_string(),
             Self::Denied { attempts_left } => format!("denied{SEP}{attempts_left}"),
             Self::Rejected => "rejected".to_string(),
+            Self::Identity {
+                public_key,
+                signature,
+            } => format!(
+                "identity{SEP}{}{SEP}{}",
+                to_hex(public_key),
+                to_hex(signature)
+            ),
         }
     }
 
@@ -132,6 +229,14 @@ impl AuthResponse {
             "denied" => {
                 let attempts_left = parts.next()?.parse().ok()?;
                 Self::Denied { attempts_left }
+            }
+            "identity" => {
+                let public_key = from_hex(parts.next()?, PUBLIC_KEY_LEN)?;
+                let signature = from_hex(parts.next()?, SIGNATURE_LEN)?;
+                Self::Identity {
+                    public_key,
+                    signature,
+                }
             }
             _ => return None,
         };
@@ -151,6 +256,7 @@ impl fmt::Display for AuthResponse {
                 write!(f, "неверный пароль, осталось попыток: {attempts_left}")
             }
             Self::Rejected => write!(f, "хозяин машины отклонил подключение"),
+            Self::Identity { .. } => write!(f, "хост назвал свой ключ"),
         }
     }
 }
@@ -177,6 +283,63 @@ mod tests {
             let parsed = AuthResponse::parse(&original.encode()).expect("разбор");
             assert_eq!(parsed, original, "не пережило кодирование: {original:?}");
         }
+    }
+
+    #[test]
+    fn identify_roundtrip() {
+        let original = AuthRequest::Identify {
+            challenge: [7u8; CHALLENGE_LEN],
+        };
+        assert_eq!(AuthRequest::parse(&original.encode()), Some(original));
+    }
+
+    #[test]
+    fn identity_roundtrip() {
+        let original = AuthResponse::Identity {
+            public_key: vec![0xABu8; PUBLIC_KEY_LEN],
+            signature: vec![0xCDu8; SIGNATURE_LEN],
+        };
+        assert_eq!(AuthResponse::parse(&original.encode()), Some(original));
+    }
+
+    /// Сообщение с ключом и подписью обязано влезать в предел длины —
+    /// иначе `parse` отвергал бы **собственное** корректное сообщение,
+    /// и опознание не работало бы вовсе, а причина выглядела бы как
+    /// сетевая.
+    #[test]
+    fn identity_message_fits_the_limit() {
+        let encoded = AuthResponse::Identity {
+            public_key: vec![0u8; PUBLIC_KEY_LEN],
+            signature: vec![0u8; SIGNATURE_LEN],
+        }
+        .encode();
+
+        assert!(
+            encoded.len() <= MAX_AUTH_LEN,
+            "сообщение {} байт при пределе {MAX_AUTH_LEN}",
+            encoded.len()
+        );
+    }
+
+    /// Недоверенный ввод: ключ или подпись неверной длины отвергаются.
+    /// Без этой проверки короткая подпись дошла бы до криптографии,
+    /// где вызвала бы отказ с невнятной причиной.
+    #[test]
+    fn identity_of_wrong_length_is_rejected() {
+        let short_key = format!("identity\t{}\t{}", "ab".repeat(31), "cd".repeat(64));
+        let short_sig = format!("identity\t{}\t{}", "ab".repeat(32), "cd".repeat(63));
+        let not_hex = format!("identity\t{}\t{}", "zz".repeat(32), "cd".repeat(64));
+
+        assert!(AuthResponse::parse(&short_key).is_none());
+        assert!(AuthResponse::parse(&short_sig).is_none());
+        assert!(AuthResponse::parse(&not_hex).is_none());
+    }
+
+    #[test]
+    fn challenge_of_wrong_length_is_rejected() {
+        assert!(AuthRequest::parse(&format!("identify\t{}", "ab".repeat(15))).is_none());
+        assert!(AuthRequest::parse(&format!("identify\t{}", "ab".repeat(17))).is_none());
+        assert!(AuthRequest::parse("identify\t").is_none());
     }
 
     #[test]

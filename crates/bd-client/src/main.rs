@@ -254,6 +254,17 @@ mod run {
         };
         println!("Соединение установлено (видео, ввод и курсор одним каналом).\n");
 
+        // Опознание хоста — ПЕРЕД паролем.
+        //
+        // Порядок здесь и есть защита: пароль это секрет человека, и
+        // сообщать его раньше, чем выяснено, с кем разговариваем,
+        // значит отдавать его кому попало. Сигналинг недоверен
+        // (§8.1) и может свести нас с чужой машиной.
+        if let Err(e) = identify_host(&mut session, parse_id()) {
+            println!("\n❌ {e}");
+            anyhow::bail!("хост не опознан");
+        }
+
         // Авторизация до всего остального.
         //
         // Хост не отдаст ни одного кадра, пока не получит пароль, —
@@ -858,6 +869,172 @@ mod run {
     ///
     /// Различать их важно: требуй мы ответа всегда, клиент не смог бы
     /// подключиться к хосту без пароля вовсе.
+    /// Убедиться, что на том конце — та самая машина.
+    ///
+    /// # Порядок здесь и есть защита
+    ///
+    /// Вызывается **до** пароля, и это принципиально. Пароль —
+    /// секрет человека; сообщать его раньше, чем выяснено, с кем
+    /// разговариваем, значит отдавать его кому попало. Именно в этом
+    /// и состояла дыра: сигналинг недоверен (§8.1), подставной хост
+    /// принимал любой пароль и показывал свой экран.
+    ///
+    /// # Что делаем с ответом
+    ///
+    /// Три случая, и реакция на них разная (см. `PinVerdict`):
+    /// известный ключ — молча дальше; первая встреча — показать
+    /// отпечаток и запомнить; **смена ключа — остановиться**.
+    ///
+    /// Молчание хоста означает старую версию. Это не ошибка: рвать
+    /// связь значило бы наказывать человека за нашу же новую
+    /// возможность. Но и молчать об этом нельзя — предупреждаем.
+    fn identify_host(
+        session: &mut QuicTransport,
+        device: Option<bd_core::device::DeviceId>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use bd_core::auth::{AuthRequest, AuthResponse, CHALLENGE_LEN};
+        use bd_crypto::{DevicePublicKey, PinVerdict, PinnedKeys};
+
+        const IDENTIFY_WAIT: Duration = Duration::from_secs(5);
+
+        // Вызов должен быть случайным, иначе хост мог бы прислать
+        // подпись, записанную заранее, и её повторил бы всякий, кто
+        // однажды её подслушал.
+        let challenge: [u8; CHALLENGE_LEN] =
+            bd_crypto::random_challenge().map_err(|e| format!("нет источника случайности: {e}"))?;
+
+        let mut timings = FrameTimings::default();
+        session.send(
+            PayloadKind::Auth,
+            false,
+            AuthRequest::Identify { challenge }.encode().as_bytes(),
+            &mut timings,
+        )?;
+
+        let mut timings = FrameTimings::default();
+        let answer = match session.receive_auth_timeout(IDENTIFY_WAIT, &mut timings) {
+            Ok(Some(frame)) => std::str::from_utf8(&frame.data)
+                .ok()
+                .and_then(AuthResponse::parse),
+            Ok(None) => None,
+            Err(e) => return Err(e.into()),
+        };
+
+        let Some(AuthResponse::Identity {
+            public_key,
+            signature,
+        }) = answer
+        else {
+            println!("⚠  Хост не назвал свой ключ (старая версия).");
+            println!("   Проверить, что это именно ваша машина, нечем.\n");
+            return Ok(());
+        };
+
+        let key = DevicePublicKey::from_bytes(&public_key)
+            .map_err(|e| format!("хост прислал негодный ключ: {e}"))?;
+
+        // Подпись проверяется ПЕРЕД сличением со списком.
+        //
+        // Иначе атакующий, назвавшийся чужим ключом без подписи,
+        // получил бы вердикт «известная машина»: ключ-то верный, он
+        // публичный и общеизвестен. Подпись — единственное, что
+        // доказывает владение приватной частью.
+        if !key.verify(&challenge, &signature) {
+            return Err("хост не смог подтвердить свой ключ: подпись неверна. \
+                 Это либо подмена, либо повреждённое соединение."
+                .into());
+        }
+
+        // Сличаем только если знаем, к какому ID подключались.
+        //
+        // При прямом подключении по адресу (`--connect`) ID нет — там
+        // человек сам выбрал, куда идти, и подменить некому без
+        // доступа к сети. Запоминать по адресу нельзя: он меняется.
+        let Some(device) = device else {
+            println!("Отпечаток хоста: {}", key.fingerprint());
+            println!("(прямое подключение по адресу — ключ не запоминается)\n");
+            return Ok(());
+        };
+
+        let path = bd_core::device::data_dir().join("known_hosts");
+        let mut pins = match std::fs::read_to_string(&path) {
+            Ok(text) => PinnedKeys::from_text(&text).map_err(|e| {
+                format!("список известных машин испорчен ({}): {e}", path.display())
+            })?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => PinnedKeys::new(),
+            Err(e) => return Err(format!("не читается {}: {e}", path.display()).into()),
+        };
+
+        match pins.verdict(device.as_u32(), &key) {
+            PinVerdict::Known => {
+                println!("Машина опознана по сохранённому ключу.\n");
+            }
+            PinVerdict::FirstSight { fingerprint } => {
+                // Первая встреча ничем не отличается от подмены —
+                // кроме этой строки, которую можно сверить голосом.
+                // Так же поступают SSH и Signal.
+                println!("Эта машина видится ВПЕРВЫЕ. Её отпечаток:");
+                println!("  {fingerprint}");
+                println!("Сверьте его с тем, что показывает хост, — тем же");
+                println!("звонком, которым вам продиктовали пароль.\n");
+
+                pins.remember(device.as_u32(), key);
+                save_pins(&path, &pins)?;
+            }
+            PinVerdict::Changed { expected, actual } => {
+                // Останавливаемся. Хост мог быть переустановлен —
+                // но отличить это от подмены изнутри невозможно, и
+                // решает человек, а не мы.
+                println!("╭────────────────────────────────────────────╮");
+                println!("│  ⚠  КЛЮЧ ЭТОЙ МАШИНЫ ИЗМЕНИЛСЯ             │");
+                println!("╰────────────────────────────────────────────╯");
+                println!("Было:  {expected}");
+                println!("Стало: {actual}");
+                println!();
+                println!("Так выглядит подмена хоста. Так же выглядит");
+                println!("переустановка системы на нём — отличить нельзя.");
+                println!();
+                println!("Позвоните владельцу машины и сверьте отпечаток.");
+                // `to_compact`, а не `Display`: последний печатает ID
+                // группами по три («955 235 149»), как его диктуют
+                // голосом, — а в файле он записан слитно. Человек,
+                // которому сказали искать строку с пробелами, не
+                // найдёт её поиском и решит, что файл не тот.
+                println!(
+                    "Если он подтвердит новый — удалите строку {}",
+                    device.to_compact()
+                );
+                println!("из файла {}", path.display());
+
+                return Err("ключ хоста не совпал с запомненным".into());
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Сохранить список известных машин.
+    ///
+    /// Запись атомарная — по той же причине, что у ключа устройства:
+    /// оборванная запись оставила бы список, при чтении которого
+    /// человек получил бы «файл испорчен» вместо подключения.
+    fn save_pins(
+        path: &std::path::Path,
+        pins: &bd_crypto::PinnedKeys,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("не создать {}: {e}", parent.display()))?;
+        }
+
+        let temporary = path.with_extension("part");
+        std::fs::write(&temporary, pins.to_text())
+            .map_err(|e| format!("не записать {}: {e}", temporary.display()))?;
+        std::fs::rename(&temporary, path)
+            .map_err(|e| format!("не сохранить {}: {e}", path.display()))?;
+        Ok(())
+    }
+
     fn authenticate(
         session: &mut QuicTransport,
         preset: Option<String>,
@@ -997,6 +1174,18 @@ mod run {
                 }
                 Some(AuthResponse::Rejected) => {
                     return Err("хозяин машины отклонил подключение".into());
+                }
+                Some(AuthResponse::Identity { .. }) => {
+                    // Запоздавший ответ на опознание: оно прошло
+                    // раньше (`identify_host`), а этот пакет догнал
+                    // нас уже здесь.
+                    //
+                    // Пропускаем и ждём настоящего ответа, а не
+                    // считаем молчанием: принять его за «хост без
+                    // пароля» значило бы пойти дальше без пароля там,
+                    // где он требуется, — то есть упереться в чёрный
+                    // экран без объяснения (родственно находке 64).
+                    continue;
                 }
                 None => {
                     // Хост не ответил — он без пароля. Не ошибка.

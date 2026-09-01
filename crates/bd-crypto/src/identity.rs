@@ -412,3 +412,59 @@ mod tests {
         assert_ne!(one.public(), two.public());
     }
 }
+
+/// Проверка согласования с wire-форматом `bd-core`.
+///
+/// `bd_core::auth` объявляет длины ключа и подписи своими константами
+/// — он не зависит от криптографии (§4.2.1). Разъедься эти числа, и
+/// разбор отвергал бы **корректные** сообщения, а причина выглядела
+/// бы как сетевая ошибка. Ровно находка 62: копии не расходятся,
+/// только пока их не правят.
+#[cfg(test)]
+mod wire_agreement {
+    use super::{PUBLIC_LEN, SIGNATURE_LEN};
+
+    #[test]
+    fn wire_sizes_match_ed25519() {
+        assert_eq!(bd_core::auth::PUBLIC_KEY_LEN, PUBLIC_LEN);
+        assert_eq!(bd_core::auth::SIGNATURE_LEN, SIGNATURE_LEN);
+    }
+}
+
+/// Случайные байты для вызова, который подписывает хост.
+///
+/// # Почему это здесь, а не у клиента
+///
+/// Источник случайности один на весь проект, и он уже выбран здесь:
+/// `SysRng`, с отказом вместо тихого отката на слабый генератор.
+/// Клиенту пришлось бы тянуть `rand` отдельно и повторять то же
+/// решение — то есть завести копию, которая рано или поздно
+/// разойдётся (находка 62).
+///
+/// Предсказуемый вызов сводит на нет всю проверку: хост подписал бы
+/// известные заранее байты, и подпись повторил бы всякий, кто её
+/// однажды подслушал.
+pub fn random_challenge<const N: usize>() -> Result<[u8; N], IdentityError> {
+    let mut out = [0u8; N];
+    SysRng
+        .try_fill_bytes(&mut out)
+        .map_err(|e| IdentityError::NoRandomness(e.to_string()))?;
+    Ok(out)
+}
+
+#[cfg(test)]
+mod challenge_tests {
+    use super::random_challenge;
+
+    /// Два вызова обязаны различаться. Ловит вырожденный случай, при
+    /// котором источник отдаёт нули: всё работает, а подпись
+    /// повторяется от сессии к сессии и годится для replay.
+    #[test]
+    fn challenges_differ_between_calls() {
+        let one: [u8; 16] = random_challenge().expect("случайность");
+        let two: [u8; 16] = random_challenge().expect("случайность");
+
+        assert_ne!(one, two);
+        assert_ne!(one, [0u8; 16], "вызов из одних нулей — не случайность");
+    }
+}
