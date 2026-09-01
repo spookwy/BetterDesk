@@ -53,6 +53,7 @@ mod run {
     use bd_core::frame::{FrameInfo, FrameSize};
     use bd_core::input::SequencedInput;
     use bd_core::metrics::{FrameTimings, LatencyWindow, Stage};
+    use bd_core::signaling::DEFAULT_SIGNALING;
     use bd_core::time::{now, Epoch, Timestamp};
     use bd_input::InputTracker;
     use bd_render::windows::VideoWindow;
@@ -106,11 +107,17 @@ mod run {
         // выбирает конструктор.
         let mut punched: Option<std::net::UdpSocket> = None;
 
-        let server = match (parse_connect(), parse_id(), parse_arg("--signaling")) {
-            // Прямой адрес имеет приоритет: он задан явнее.
-            (Some(addr), _, _) => addr,
+        // Адрес сигналинга вшит (§7.1): человеку достаточно ввести
+        // девять цифр, про серверы он знать не обязан. Флаг остаётся
+        // для своего сервера и отладки.
+        let signaling_url =
+            parse_arg("--signaling").unwrap_or_else(|| DEFAULT_SIGNALING.to_string());
 
-            (None, Some(id), Some(signaling_url)) => {
+        let server = match (parse_connect(), parse_id()) {
+            // Прямой адрес имеет приоритет: он задан явнее.
+            (Some(addr), _) => addr,
+
+            (None, Some(id)) => {
                 // Сокет создаётся ДО обращения к серверу: его порт
                 // уходит хосту как адрес для встречного пробивания,
                 // и он же потом отдаётся QUIC. Разорви эту связь —
@@ -164,21 +171,18 @@ mod run {
                 }
             }
 
-            (None, Some(_), None) => {
-                println!("❌ Для подключения по ID нужен адрес сигналинга.");
-                println!("   Добавьте --signaling ws://АДРЕС:9000/ws");
-                return Ok(());
-            }
-
-            (None, None, _) => {
-                println!("Запуск — одним из двух способов:\n");
-                println!("  По ID (нужен сервер связи):");
-                println!("    --id 418207356 --signaling ws://АДРЕС:9000/ws\n");
-                println!("  Напрямую по адресу (в локальной сети):");
-                println!("    --connect 192.168.1.5:7000\n");
-                println!("На хосте при этом:");
-                println!("  cargo run --release -p bd-host -- --listen 0.0.0.0:7000");
-                println!("  (и то же --signaling, если подключаются по ID)");
+            (None, None) => {
+                println!("Нужно сказать, к кому подключаться:\n");
+                println!("  --id 418207356        девять цифр, которые");
+                println!("                        показывает хост\n");
+                println!("  --connect 192.168.1.5:7000");
+                println!("                        напрямую по адресу,");
+                println!("                        в локальной сети\n");
+                println!("Дополнительно:");
+                println!("  --signaling URL       свой сервер связи вместо вшитого");
+                println!("  --seconds N           завершиться через N с (для замеров)");
+                println!();
+                println!("На той машине, чей экран смотрим, запустить bd-host.");
                 return Ok(());
             }
         };
