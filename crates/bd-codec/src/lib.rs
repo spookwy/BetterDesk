@@ -109,9 +109,89 @@ impl EncoderConfig {
         }
     }
 
+    /// Настройки с явно заданным битрейтом.
+    ///
+    /// Всё остальное — как в [`low_latency`](Self::low_latency).
+    /// Нужен там, где канал заведомо уже, чем позволяет разрешение:
+    /// формула масштабирует битрейт от площади кадра, и монитор
+    /// 2560x1600 просит 29.6 Мбит/с — больше, чем прокачает обычный
+    /// интернет-канал.
+    ///
+    /// Границы те же, что у автоматического расчёта: ниже 1 Мбит/с
+    /// картинка распадается независимо от настроек, выше 100 Мбит/с
+    /// упирается в канал раньше, чем в энкодер.
+    pub fn with_bitrate(size: FrameSize, fps: u32, bitrate: u32) -> Self {
+        Self {
+            rate_control: RateControl::Cbr {
+                bitrate: bitrate.clamp(1_000_000, 100_000_000),
+            },
+            ..Self::low_latency(size, fps)
+        }
+    }
+
+    /// Настройки по пресету качества.
+    pub fn preset(size: FrameSize, fps: u32, preset: QualityPreset) -> Self {
+        let auto = Self::low_latency(size, fps).rate_control.target_bitrate();
+        Self::with_bitrate(size, fps, preset.apply(auto))
+    }
+
     /// Ожидаемая длительность одного кадра.
     pub fn frame_duration(&self) -> Duration {
         Duration::from_secs_f64(1.0 / self.fps.max(1) as f64)
+    }
+}
+
+/// Пресет качества — во сколько раз брать от автоматического битрейта.
+///
+/// Автоматический расчёт (§5.2) исходит из площади кадра и рассчитан
+/// на канал, который его вытянет. Через интернет это неверно: канал
+/// задан провайдером, а не разрешением монитора. Пресет — грубая
+/// ручка на этот случай, до появления автоматического контроллера
+/// битрейта на этапе 6.
+///
+/// Множители, а не абсолютные значения: 15 Мбит/с — это «много» для
+/// 720p и «мало» для 4K, и одна и та же цифра означала бы разное
+/// качество на разных машинах.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QualityPreset {
+    /// Экономный: четверть от расчётного. Для узкого или занятого
+    /// канала — текст остаётся читаемым, градиенты грубеют.
+    Low,
+    /// Обычный: расчётный битрейт. То, что было до появления флага.
+    Medium,
+    /// Максимальный: полтора расчётных. Имеет смысл только там, где
+    /// канал заведомо шире (локальная сеть).
+    High,
+}
+
+impl QualityPreset {
+    /// Применить пресет к автоматически рассчитанному битрейту.
+    pub fn apply(self, auto_bitrate: u32) -> u32 {
+        let scaled = match self {
+            QualityPreset::Low => auto_bitrate as u64 / 4,
+            QualityPreset::Medium => auto_bitrate as u64,
+            QualityPreset::High => auto_bitrate as u64 * 3 / 2,
+        };
+        scaled.min(u32::MAX as u64) as u32
+    }
+
+    /// Разбор имени пресета из аргумента командной строки.
+    pub fn parse(name: &str) -> Option<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "low" => Some(QualityPreset::Low),
+            "medium" => Some(QualityPreset::Medium),
+            "high" => Some(QualityPreset::High),
+            _ => None,
+        }
+    }
+
+    /// Человекочитаемое имя для вывода.
+    pub fn name(self) -> &'static str {
+        match self {
+            QualityPreset::Low => "низкое",
+            QualityPreset::Medium => "среднее",
+            QualityPreset::High => "высокое",
+        }
     }
 }
 
@@ -293,5 +373,82 @@ mod tests {
         let cfg = EncoderConfig::low_latency(FrameSize::new(1920, 1080), 60);
         let ms = cfg.frame_duration().as_secs_f64() * 1000.0;
         assert!((ms - 16.667).abs() < 0.01, "получено {ms} мс");
+    }
+    #[test]
+    fn presets_are_ordered_and_medium_matches_auto() {
+        let size = FrameSize::new(1920, 1080);
+        let auto = EncoderConfig::low_latency(size, 60)
+            .rate_control
+            .target_bitrate();
+
+        let low = EncoderConfig::preset(size, 60, QualityPreset::Low)
+            .rate_control
+            .target_bitrate();
+        let medium = EncoderConfig::preset(size, 60, QualityPreset::Medium)
+            .rate_control
+            .target_bitrate();
+        let high = EncoderConfig::preset(size, 60, QualityPreset::High)
+            .rate_control
+            .target_bitrate();
+
+        assert!(low < medium, "низкое должно быть меньше среднего");
+        assert!(medium < high, "среднее должно быть меньше высокого");
+        assert_eq!(medium, auto, "medium обязан совпадать с расчётным");
+    }
+
+    #[test]
+    fn explicit_bitrate_wins_over_scaling() {
+        // Смысл флага: канал задан провайдером, а не разрешением.
+        // Большой монитор не должен продавить заданное значение.
+        let cfg = EncoderConfig::with_bitrate(FrameSize::new(2560, 1600), 60, 8_000_000);
+        assert_eq!(cfg.rate_control.target_bitrate(), 8_000_000);
+    }
+
+    #[test]
+    fn explicit_bitrate_is_clamped() {
+        let size = FrameSize::new(1920, 1080);
+        // Ноль и абсурдно большое значение не должны доходить до энкодера:
+        // NVENC на нуле не откажет, а выдаст кашу вместо картинки.
+        assert!(
+            EncoderConfig::with_bitrate(size, 60, 0)
+                .rate_control
+                .target_bitrate()
+                >= 1_000_000
+        );
+        assert!(
+            EncoderConfig::with_bitrate(size, 60, u32::MAX)
+                .rate_control
+                .target_bitrate()
+                <= 100_000_000
+        );
+    }
+
+    #[test]
+    fn preset_names_round_trip_and_reject_garbage() {
+        for p in [
+            QualityPreset::Low,
+            QualityPreset::Medium,
+            QualityPreset::High,
+        ] {
+            assert!(!p.name().is_empty());
+        }
+        assert_eq!(QualityPreset::parse("low"), Some(QualityPreset::Low));
+        assert_eq!(QualityPreset::parse("HIGH"), Some(QualityPreset::High));
+        // Разбор нечувствителен к регистру и пробелам: человек печатает
+        // флаг руками, и `--quality LOW ` не должно быть ошибкой.
+        assert_eq!(QualityPreset::parse(" Low "), Some(QualityPreset::Low));
+        // Проверка обязана уметь отвергать — иначе она ничего не значит.
+        assert_eq!(QualityPreset::parse("ultra"), None);
+        assert_eq!(QualityPreset::parse(""), None);
+    }
+
+    #[test]
+    fn preset_keeps_intra_refresh() {
+        // Пресет меняет только битрейт. Intra Refresh обязателен по
+        // §5.2 независимо от качества, и потерять его при смене
+        // конструктора было бы тихим регрессом.
+        let cfg = EncoderConfig::preset(FrameSize::new(1920, 1080), 60, QualityPreset::Low);
+        assert!(cfg.intra_refresh);
+        assert_eq!(cfg.fps, 60);
     }
 }

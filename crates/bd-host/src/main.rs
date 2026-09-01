@@ -44,8 +44,9 @@ mod run {
     use crate::any_encoder::AnyEncoder;
     use bd_capture::windows::{enumerate_monitors, DxgiCapturer};
     use bd_capture::{CaptureOutcome, Capturer};
-    use bd_codec::{EncoderConfig, FrameKind};
+    use bd_codec::{EncoderConfig, FrameKind, QualityPreset};
     use bd_core::device::DeviceId;
+    use bd_core::frame::FrameSize;
     use bd_core::input::SequencedInput;
     use bd_core::metrics::FrameTimings;
     use bd_core::pacing::FrameLimiter;
@@ -148,13 +149,37 @@ mod run {
         // пересоздаётся (находка 31).
         let mut size = capturer.size();
 
-        let encoder_config = EncoderConfig::low_latency(size, 60);
+        // Частота выясняется ДО конфига энкодера, а не после.
+        //
+        // Раньше здесь стояла вшитая `60`, а `--fps` доходил только до
+        // ограничителя. То есть при `--fps 30` энкодер настраивался на
+        // 60: битрейт, VBV и период Intra Refresh считались от частоты,
+        // которой не было. Ровно тот класс, что в находке 62 — значение
+        // объявлено флагом, но до потребителя не доходит.
+        let fps_limit = parse_fps().unwrap_or(60);
+
+        // `--fps 0` снимает предел частоты у ограничителя, но энкодеру
+        // нужна конкретная цифра: на нуле битрейт схлопнулся бы в
+        // нижний clamp. Берём 60 — то, во что упрётся поток на практике.
+        let encoder_fps = if fps_limit == 0 { 60 } else { fps_limit };
+
+        let encoder_config = build_encoder_config(size, encoder_fps);
         let target_bitrate = encoder_config.rate_control.target_bitrate();
         println!(
-            "Энкодер: H.264 {}x{}@60, CBR {} Мбит/с",
+            "Энкодер: H.264 {}x{}@{}, CBR {:.1} Мбит/с{}",
             size.width,
             size.height,
-            target_bitrate / 1_000_000
+            encoder_fps,
+            target_bitrate as f64 / 1_000_000.0,
+            match (parse_bitrate(), parse_preset()) {
+                (Some(_), _) => " (задан --bitrate)",
+                (None, Some(p)) => match p {
+                    bd_codec::QualityPreset::Low => " (--quality low)",
+                    bd_codec::QualityPreset::Medium => " (--quality medium)",
+                    bd_codec::QualityPreset::High => " (--quality high)",
+                },
+                (None, None) => "",
+            }
         );
 
         let mut encoder = match AnyEncoder::new(capturer.device(), encoder_config, epoch) {
@@ -178,7 +203,6 @@ mod run {
         // они шли бы в энкодер. При CBR битрейт делится на фактическое
         // число кадров, и каждому достаётся втрое меньше бит: это
         // видно глазом как пикселизация (находка 30).
-        let fps_limit = parse_fps().unwrap_or(60);
         let mut limiter = FrameLimiter::new(fps_limit);
         if fps_limit > 0 {
             println!("Предел частоты кодирования: {fps_limit} кадров/с");
@@ -548,7 +572,7 @@ mod run {
                         size = fresh;
                         encoder = AnyEncoder::new(
                             capturer.device(),
-                            EncoderConfig::low_latency(size, 60),
+                            build_encoder_config(size, encoder_fps),
                             epoch,
                         )?;
                     }
@@ -951,6 +975,8 @@ mod run {
         println!("  --no-signaling       работать только по прямому адресу");
         println!("  --monitor N          какой экран отдавать (по умолчанию основной)");
         println!("  --fps N              предел частоты кодирования (по умолчанию 60)");
+        println!("  --bitrate МБИТ       битрейт вручную, напр. --bitrate 8");
+        println!("  --quality low|medium|high   пресет качества (от расчётного)");
         println!("  --inject-input       применять ввод клиента (по умолчанию НЕТ)");
         println!("  --seconds N          завершиться через N с (для замеров)");
         println!();
@@ -988,6 +1014,45 @@ mod run {
 
     fn parse_seconds() -> Option<u64> {
         parse_arg("--seconds").and_then(|v| v.parse().ok())
+    }
+
+    /// Собрать настройки энкодера с учётом флагов качества.
+    ///
+    /// Единственное место, где решается битрейт. Точек создания
+    /// энкодера две — при старте и при смене разрешения, — и разойдись
+    /// они, смена разрешения молча вернула бы автоматический битрейт,
+    /// отменив заданный человеком (находка 62 — ровно про разошедшиеся
+    /// копии одного условия).
+    ///
+    /// Приоритет: явный `--bitrate` перекрывает `--quality`. Если
+    /// человек назвал точную цифру, она и означает намерение.
+    fn build_encoder_config(size: FrameSize, fps: u32) -> EncoderConfig {
+        if let Some(bitrate) = parse_bitrate() {
+            return EncoderConfig::with_bitrate(size, fps, bitrate);
+        }
+        match parse_preset() {
+            Some(preset) => EncoderConfig::preset(size, fps, preset),
+            None => EncoderConfig::low_latency(size, fps),
+        }
+    }
+
+    /// Разобрать `--bitrate МБИТ`.
+    ///
+    /// Значение в мегабитах, а не битах: человек за клавиатурой думает
+    /// в мегабитах, и `--bitrate 8` читается однозначно, тогда как
+    /// `--bitrate 8000000` легко ошибиться на порядок.
+    fn parse_bitrate() -> Option<u32> {
+        let raw = parse_arg("--bitrate")?;
+        let mbit: f64 = raw.trim().replace(',', ".").parse().ok()?;
+        if !mbit.is_finite() || mbit <= 0.0 {
+            return None;
+        }
+        Some((mbit * 1_000_000.0) as u32)
+    }
+
+    /// Разобрать `--quality low|medium|high`.
+    fn parse_preset() -> Option<QualityPreset> {
+        QualityPreset::parse(&parse_arg("--quality")?)
     }
 
     fn parse_fps() -> Option<u32> {
