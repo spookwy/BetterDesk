@@ -32,3 +32,4 @@ desktop.ini
 
 # Сборка серверного workspace (у него свой target/).
 /server/target/
+/dist/
