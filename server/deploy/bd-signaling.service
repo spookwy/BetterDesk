@@ -1,0 +1,45 @@
+[Unit]
+Description=BetterDesk signaling
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+ExecStart=/opt/betterdesk/bd-signaling --listen 0.0.0.0:9000
+Restart=always
+RestartSec=2
+
+# Свой пользователь без прав: сигналинг разбирает данные из сети до
+# всякой аутентификации (§8.5), и компрометация процесса не должна
+# давать ничего сверх него самого.
+User=betterdesk
+Group=betterdesk
+
+# Ограничения ядра. Сервер только слушает сокет и держит HashMap —
+# ему не нужны ни файлы, ни новые привилегии, ни устройства.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+
+# Память: реестр хостов — это HashMap из ID в адрес, и даже тысячи
+# записей весят килобайты. Предел ловит утечку, а не ограничивает
+# работу: упереться в него при штатной нагрузке невозможно.
+MemoryMax=256M
+
+# Журнал целиком в systemd: своих файлов сервер не пишет.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
