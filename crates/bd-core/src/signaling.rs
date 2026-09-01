@@ -71,7 +71,7 @@ pub const MAX_MESSAGE_LEN: usize = 512;
 /// требует вовсе, и в локальной сети это полный, а не урезанный
 /// режим. Значение переопределяется флагом `--signaling`: он остаётся
 /// для своего сервера и для отладки.
-pub const DEFAULT_SIGNALING: &str = "ws://127.0.0.1:9000/ws";
+pub const DEFAULT_SIGNALING: &str = "ws://89.168.99.202:9000/ws";
 
 /// Сообщение от устройства к серверу.
 #[derive(Debug, Clone, PartialEq, Eq)]
