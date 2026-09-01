@@ -29,6 +29,26 @@ const SEND_QUEUE_FRAMES: usize = 8;
 /// придётся выбросить.
 const RECV_QUEUE_FRAMES: usize = 4;
 
+/// Откуда транспорт берёт UDP-сокет.
+///
+/// # Почему два способа, а не один
+///
+/// В локальной сети пробивать нечего: адрес известен, роутер между
+/// сторонами либо один, либо его нет. Там достаточно адреса, и
+/// заставлять вызывающего создавать сокет руками значило бы
+/// усложнять частый случай ради редкого.
+///
+/// Через интернет всё наоборот: отображение в NAT заводится для
+/// **конкретного порта**, поэтому пробивать надо тем же сокетом, на
+/// котором потом пойдут данные (находка 59). Такой сокет создаётся
+/// снаружи, пробивается [`crate::punch`] и приходит сюда готовым.
+enum Bind {
+    /// Адрес привязки — сокет создаст сам quinn.
+    Addr(SocketAddr),
+    /// Готовый сокет, обычно уже пробитый.
+    Socket(std::net::UdpSocket),
+}
+
 /// Роль стороны в соединении.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -146,7 +166,7 @@ impl QuicTransport {
     /// хосту всё равно нечего делать. Это единственное место, где
     /// транспорт блокирует вызывающего.
     pub fn host(bind: SocketAddr, accept_timeout: Duration, epoch: Epoch) -> Result<Self> {
-        Self::spawn(Role::Host, bind, None, accept_timeout, epoch)
+        Self::spawn(Role::Host, Bind::Addr(bind), None, accept_timeout, epoch)
     }
 
     /// Подключиться к хосту.
@@ -158,13 +178,56 @@ impl QuicTransport {
         }
         .map_err(|e| TransportError::Setup(format!("адрес привязки: {e}")))?;
 
-        Self::spawn(Role::Client, bind, Some(server), timeout, epoch)
+        Self::spawn(Role::Client, Bind::Addr(bind), Some(server), timeout, epoch)
+    }
+
+    /// Поднять хост на **уже пробитом** сокете.
+    ///
+    /// # Зачем отдельный конструктор
+    ///
+    /// Пробивание NAT открывает отображение в роутере для конкретного
+    /// порта, и данные обязаны пойти **с того же сокета** — иначе
+    /// дырка окажется не там, где нужно (находка 59). Поэтому сокет
+    /// создаётся снаружи, пробивается [`crate::punch`] и передаётся
+    /// сюда готовым.
+    ///
+    /// `bind`-конструкторы остаются: в локальной сети пробивать
+    /// нечего, и заставлять вызывающего возиться с сокетом там, где
+    /// это не нужно, значило бы усложнять частый случай ради редкого.
+    pub fn host_on_socket(
+        socket: std::net::UdpSocket,
+        accept_timeout: Duration,
+        epoch: Epoch,
+    ) -> Result<Self> {
+        Self::spawn(
+            Role::Host,
+            Bind::Socket(socket),
+            None,
+            accept_timeout,
+            epoch,
+        )
+    }
+
+    /// Подключиться к хосту с **уже пробитого** сокета.
+    pub fn connect_on_socket(
+        socket: std::net::UdpSocket,
+        server: SocketAddr,
+        timeout: Duration,
+        epoch: Epoch,
+    ) -> Result<Self> {
+        Self::spawn(
+            Role::Client,
+            Bind::Socket(socket),
+            Some(server),
+            timeout,
+            epoch,
+        )
     }
 
     /// Общая часть: поднять поток и дождаться соединения.
     fn spawn(
         role: Role,
-        bind: SocketAddr,
+        bind: Bind,
         server: Option<SocketAddr>,
         timeout: Duration,
         epoch: Epoch,
@@ -396,7 +459,7 @@ impl QuicTransport {
 #[allow(clippy::too_many_arguments)]
 fn run_worker(
     role: Role,
-    bind: SocketAddr,
+    bind: Bind,
     server: Option<SocketAddr>,
     outgoing: Receiver<Outgoing>,
     incoming: Sender<ReassembledFrame>,
@@ -442,16 +505,31 @@ fn run_worker(
 /// Установить соединение согласно роли.
 async fn establish(
     role: Role,
-    bind: SocketAddr,
+    bind: Bind,
     server: Option<SocketAddr>,
 ) -> Result<quinn::Connection> {
     match role {
         Role::Host => {
             let (server_config, _cert) = config::server_config()?;
-            let endpoint = quinn::Endpoint::server(server_config, bind)
-                .map_err(|e| TransportError::Setup(format!("привязка к {bind}: {e}")))?;
+            let endpoint = match bind {
+                Bind::Addr(addr) => quinn::Endpoint::server(server_config, addr)
+                    .map_err(|e| TransportError::Setup(format!("привязка к {addr}: {e}")))?,
+                // Готовый сокет: он уже пробит, и отображение в NAT
+                // заведено именно для его порта. Создавать новый
+                // здесь значило бы выбросить всю работу пробивания.
+                Bind::Socket(socket) => quinn::Endpoint::new(
+                    quinn::EndpointConfig::default(),
+                    Some(server_config),
+                    socket,
+                    Arc::new(quinn::TokioRuntime),
+                )
+                .map_err(|e| TransportError::Setup(format!("точка входа на сокете: {e}")))?,
+            };
 
-            tracing::info!(%bind, "хост ждёт подключения");
+            let local = endpoint
+                .local_addr()
+                .map_err(|e| TransportError::Setup(format!("адрес точки входа: {e}")))?;
+            tracing::info!(%local, "хост ждёт подключения");
 
             let incoming = endpoint
                 .accept()
@@ -466,8 +544,18 @@ async fn establish(
             let server = server
                 .ok_or_else(|| TransportError::Setup("клиенту не задан адрес сервера".into()))?;
 
-            let mut endpoint = quinn::Endpoint::client(bind)
-                .map_err(|e| TransportError::Setup(format!("привязка клиента: {e}")))?;
+            let mut endpoint = match bind {
+                Bind::Addr(addr) => quinn::Endpoint::client(addr)
+                    .map_err(|e| TransportError::Setup(format!("привязка клиента: {e}")))?,
+                // Тот же довод, что у хоста: пробитый сокет менять нельзя.
+                Bind::Socket(socket) => quinn::Endpoint::new(
+                    quinn::EndpointConfig::default(),
+                    None,
+                    socket,
+                    Arc::new(quinn::TokioRuntime),
+                )
+                .map_err(|e| TransportError::Setup(format!("клиент на сокете: {e}")))?,
+            };
             endpoint.set_default_client_config(config::client_config()?);
 
             // Имя сервера для TLS. Проверять его сейчас некому

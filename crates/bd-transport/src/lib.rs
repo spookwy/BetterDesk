@@ -34,6 +34,7 @@ pub mod fragment;
 pub mod jitter;
 pub mod loopback;
 pub mod packet;
+pub mod punch;
 pub mod quic;
 
 pub use discovery::{SignalEvent, Signaling};
@@ -45,4 +46,5 @@ pub use fragment::{
 pub use jitter::JitterBuffer;
 pub use loopback::{LinkProfile, LoopbackTransport, TransportStats};
 pub use packet::{FragmentHeader, PayloadKind, HEADER_SIZE, PROTOCOL_VERSION};
+pub use punch::{punch, reachable_addr, PunchOutcome};
 pub use quic::{QuicTransport, Role};
