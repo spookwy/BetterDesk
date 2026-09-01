@@ -228,6 +228,35 @@ mod run {
         // `Signaling` держится в переменной до конца функции: его
         // `Drop` закрывает соединение, и хост исчез бы из реестра
         // ровно в тот момент, когда стал доступен.
+        // Пароль сессии — ДО ожидания клиента.
+        //
+        // Человек должен продиктовать его вместе с ID, а после начала
+        // ожидания хост уже ничего не печатает: `QuicTransport::host`
+        // блокируется.
+        //
+        // Пароль **обязателен**. До него хост, зарегистрированный на
+        // публичном сигналинге, отдавал экран любому, кто угадает
+        // девять цифр: ID — это имя, а не секрет (§7.3), он короткий
+        // и диктуется вслух.
+        //
+        // `--no-password` оставлен для замеров: там сессий десятки за
+        // час, и ввод пароля каждый раз мешал бы. Но это осознанное
+        // снятие защиты, а не удобство по умолчанию.
+        let require_password = !parse_flag("--no-password");
+        let session_password = if require_password {
+            match bd_crypto::SessionPassword::generate() {
+                Ok((plain, checker)) => Some((plain, checker)),
+                Err(e) => {
+                    // Сбой генератора не должен превращаться в
+                    // отсутствие защиты: без пароля не работаем.
+                    println!("❌ Не удалось создать пароль сессии: {e}");
+                    return Err(anyhow::anyhow!("пароль сессии недоступен"));
+                }
+            }
+        } else {
+            None
+        };
+
         // Сигналинг включён ПО УМОЛЧАНИЮ, адрес вшит (§7.1).
         //
         // Раньше он требовал явного `--signaling`, и человек, просто
@@ -297,6 +326,24 @@ mod run {
             None => None,
         };
 
+        // Пароль печатается ЗДЕСЬ, а не в ветке сигналинга.
+        //
+        // Сначала он показывался рядом с ID — и при `--no-signaling`
+        // не показывался вовсе: пароль есть, хост его требует, а
+        // человек не знает какой. Подключиться было невозможно, и
+        // выглядело бы это как «клиент не соединяется».
+        //
+        // Способ подключения и наличие пароля — независимые вещи, и
+        // печать не должна зависеть от первого.
+        if let Some((plain, _)) = &session_password {
+            println!("╭──────────────────────────────╮");
+            println!("│  Пароль сессии               │");
+            println!("│                              │");
+            println!("│            {plain}            │");
+            println!("╰──────────────────────────────╯");
+            println!("Новый при каждом запуске. Диктовать вместе с ID.\n");
+        }
+
         println!("Жду клиента ({} с)...", ACCEPT_TIMEOUT.as_secs());
 
         // Если сигналинг есть — ждём, пока клиент объявится, и бьём
@@ -317,6 +364,28 @@ mod run {
             None => QuicTransport::host(bind, ACCEPT_TIMEOUT, epoch)?,
         };
         println!("Клиент подключился.\n");
+
+        // Авторизация ДО первого кадра.
+        //
+        // Порядок здесь — это и есть защита: соединение установлено,
+        // но экран ещё не отдан. Проверь мы пароль после начала
+        // передачи, посторонний увидел бы хотя бы один кадр — а этого
+        // достаточно, чтобы прочесть, что открыто на экране.
+        if let Some((_, checker)) = &session_password {
+            match authorize(&mut session, checker) {
+                Ok(true) => println!("Пароль принят.\n"),
+                Ok(false) => {
+                    println!("Подключение отклонено: пароль не подошёл.\n");
+                    return Ok(());
+                }
+                Err(e) => {
+                    println!("Соединение потеряно во время авторизации: {e}\n");
+                    return Ok(());
+                }
+            }
+        } else {
+            println!("⚠  Пароль ОТКЛЮЧЁН (--no-password): подключится кто угодно.\n");
+        }
 
         // Инжект ввода по умолчанию ВЫКЛЮЧЕН.
         //
@@ -759,6 +828,118 @@ mod run {
     }
 
     /// Разобрать `--listen АДРЕС:ПОРТ`.
+    /// Проверить пароль клиента.
+    ///
+    /// `Ok(true)` — доступ разрешён; `Ok(false)` — попытки исчерпаны
+    /// или клиент сдался. `Err` — соединение оборвалось.
+    ///
+    /// # Почему попытки ограничены
+    ///
+    /// Пароль из шести цифр перебирается за миллион попыток. Без
+    /// предела установленное соединение стало бы удобным каналом для
+    /// перебора: QUIC держит сессию, а хост отвечал бы быстро.
+    /// Три попытки — и сессия рвётся; при следующем запуске хоста
+    /// пароль уже другой.
+    fn authorize(
+        session: &mut QuicTransport,
+        checker: &bd_crypto::SessionPassword,
+    ) -> anyhow::Result<bool> {
+        use bd_core::auth::{AuthRequest, AuthResponse, MAX_ATTEMPTS};
+
+        // Сколько ждать пароля. Человек на той стороне вводит его
+        // руками, поэтому счёт идёт на десятки секунд, а не на
+        // миллисекунды.
+        const AUTH_WAIT: Duration = Duration::from_secs(60);
+
+        let mut attempts_used = 0u8;
+        let deadline = now() + AUTH_WAIT;
+
+        while now() < deadline {
+            let mut timings = FrameTimings::default();
+            let left = deadline.saturating_duration_since(now());
+
+            let delivered = match session.receive_timeout(left, &mut timings) {
+                Ok(Some(frame)) => frame,
+                // Ничего не пришло за отведённое время.
+                Ok(None) => continue,
+                Err(e) => return Err(anyhow::anyhow!("{e}")),
+            };
+
+            // Всё, кроме авторизации, до неё игнорируется. Клиент не
+            // должен иметь возможности прислать ввод или что-то ещё,
+            // не назвав пароля.
+            if delivered.kind != PayloadKind::Auth {
+                continue;
+            }
+
+            // Недоверенные данные: мусор не рвёт сессию, но и не
+            // засчитывается как попытка — иначе посторонний исчерпал
+            // бы лимит человека тремя пакетами мусора.
+            let Ok(text) = std::str::from_utf8(&delivered.data) else {
+                continue;
+            };
+            let Some(AuthRequest::Password(attempt)) = AuthRequest::parse(text) else {
+                continue;
+            };
+
+            // Пустой пароль — это вопрос «а нужен ли пароль?», а не
+            // попытка подбора: клиент шлёт его, чтобы отличить хост с
+            // авторизацией от хоста без неё.
+            //
+            // Засчитывать его как попытку нельзя: тогда у человека
+            // оставалось бы две вместо трёх, причём он бы не понял,
+            // куда делась первая. Подбору это ничего не даёт — пустой
+            // пароль всё равно неверен.
+            if attempt.is_empty() {
+                let mut timings = FrameTimings::default();
+                let _ = session.send(
+                    PayloadKind::Auth,
+                    false,
+                    AuthResponse::Denied {
+                        attempts_left: MAX_ATTEMPTS.saturating_sub(attempts_used),
+                    }
+                    .encode()
+                    .as_bytes(),
+                    &mut timings,
+                );
+                continue;
+            }
+
+            if checker.verify(&attempt) {
+                let mut timings = FrameTimings::default();
+                let _ = session.send(
+                    PayloadKind::Auth,
+                    false,
+                    AuthResponse::Granted.encode().as_bytes(),
+                    &mut timings,
+                );
+                return Ok(true);
+            }
+
+            attempts_used += 1;
+            let attempts_left = MAX_ATTEMPTS.saturating_sub(attempts_used);
+            println!("Неверный пароль. Осталось попыток: {attempts_left}");
+
+            let mut timings = FrameTimings::default();
+            let _ = session.send(
+                PayloadKind::Auth,
+                false,
+                AuthResponse::Denied { attempts_left }.encode().as_bytes(),
+                &mut timings,
+            );
+
+            if attempts_left == 0 {
+                // Дать ответу уйти до разрыва: иначе человек увидит
+                // обрыв связи вместо объяснения, почему его не пустили.
+                std::thread::sleep(Duration::from_millis(200));
+                return Ok(false);
+            }
+        }
+
+        println!("Пароль не введён за {} с.", AUTH_WAIT.as_secs());
+        Ok(false)
+    }
+
     /// Справка по флагам.
     fn print_usage() {
         println!("BetterDesk — хост\n");

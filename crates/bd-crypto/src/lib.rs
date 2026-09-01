@@ -6,3 +6,7 @@
 //! Реализация — этап 5 (docs/roadmap.md).
 
 #![forbid(unsafe_code)]
+
+pub mod password;
+
+pub use password::{PasswordError, SessionPassword};

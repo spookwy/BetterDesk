@@ -132,6 +132,13 @@ pub struct QuicTransport {
     /// ним дешевле любой косвенности, а структура остаётся пустой,
     /// пока ничего не отправлено.
     next_sequence: Vec<(PayloadKind, u64)>,
+    /// Кадры, забранные из очереди не тем, кому предназначались.
+    ///
+    /// Заполняется `receive_auth_timeout`, когда тот вылавливает
+    /// авторизацию из общего потока. Без буфера чужие кадры
+    /// пришлось бы выбрасывать — а первым идёт ключевой, без
+    /// которого декодер не начнёт вовсе.
+    deferred: std::collections::VecDeque<ReassembledFrame>,
     /// Держит поток живым. При уничтожении транспорта поток
     /// завершается, потому что каналы закрываются.
     _worker: WorkerHandle,
@@ -287,6 +294,7 @@ impl QuicTransport {
             stats,
             epoch,
             next_sequence: Vec::new(),
+            deferred: std::collections::VecDeque::new(),
             _worker: worker,
         })
     }
@@ -363,6 +371,13 @@ impl QuicTransport {
     /// сборки: между ними кадр лежит в канале, и это время — часть
     /// пути, которую нельзя терять из замера.
     pub fn receive(&mut self, timings: &mut FrameTimings) -> Result<Option<ReassembledFrame>> {
+        // Отложенное авторизацией — вперёд очереди (см.
+        // `receive_auth_timeout`).
+        if let Some(frame) = self.deferred.pop_front() {
+            timings.mark(Stage::Received, self.epoch.stamp_now());
+            return Ok(Some(frame));
+        }
+
         match self.from_network.try_recv() {
             Ok(frame) => {
                 timings.mark(Stage::Received, self.epoch.stamp_now());
@@ -407,11 +422,77 @@ impl QuicTransport {
     /// `Ok(None)` — таймаут истёк, кадра нет. Это не ошибка: на
     /// статичном экране хост честно ничего не шлёт, а окно всё равно
     /// обязано жить (находка 37).
+    /// Дождаться кадра вида [`PayloadKind::Auth`], не теряя остальные.
+    ///
+    /// # Зачем отдельный метод
+    ///
+    /// Авторизация идёт до показа: клиент шлёт пароль и ждёт ответа.
+    /// Но по тому же соединению уже могут идти кадры — хост без
+    /// пароля начинает слать сразу.
+    ///
+    /// Наивное «читать очередь и выходить на любом кадре» **теряет
+    /// первый кадр**, а первым идёт ключевой: без него декодер не
+    /// может начать, и клиент показывает чёрное окно при полностью
+    /// исправном потоке. Живой прогон показал ровно это — 2379
+    /// отправленных кадров против нуля показанных, без единой ошибки
+    /// в логе.
+    ///
+    /// Поэтому не-авторизационные кадры **откладываются** и достаются
+    /// следующему `receive`. Очередь `crossbeam` не умеет
+    /// подглядывать, так что буфер здесь неизбежен.
+    pub fn receive_auth_timeout(
+        &mut self,
+        timeout: Duration,
+        timings: &mut FrameTimings,
+    ) -> Result<Option<ReassembledFrame>> {
+        let deadline = std::time::Instant::now() + timeout;
+
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return Ok(None);
+            }
+
+            match self.from_network.recv_timeout(left) {
+                Ok(frame) => {
+                    if frame.kind == PayloadKind::Auth {
+                        timings.mark(Stage::Received, self.epoch.stamp_now());
+                        return Ok(Some(frame));
+                    }
+                    // Не наше — откладываем и ждём дальше.
+                    self.deferred.push_back(frame);
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    return if self.stats.connected.load(Ordering::Relaxed) {
+                        Ok(None)
+                    } else {
+                        Err(TransportError::Disconnected)
+                    }
+                }
+                Err(RecvTimeoutError::Disconnected) => return Err(TransportError::ThreadGone),
+            }
+        }
+    }
+
+    /// Забрать кадр, подождав до `timeout`, если очередь пуста.
+    ///
+    /// Здесь и лечится находка 41: поток паркуется до прихода кадра и
+    /// просыпается ровно по нему, а не по такту чужого цикла.
+    ///
+    /// `None` — за отведённое время ничего не пришло. Это не ошибка:
+    /// на статичном экране хост честно молчит (находка 37).
     pub fn receive_timeout(
         &mut self,
         timeout: Duration,
         timings: &mut FrameTimings,
     ) -> Result<Option<ReassembledFrame>> {
+        // Отложенное авторизацией — вперёд очереди: эти кадры пришли
+        // раньше всего, что лежит в канале.
+        if let Some(frame) = self.deferred.pop_front() {
+            timings.mark(Stage::Received, self.epoch.stamp_now());
+            return Ok(Some(frame));
+        }
+
         match self.from_network.recv_timeout(timeout) {
             Ok(frame) => {
                 timings.mark(Stage::Received, self.epoch.stamp_now());
