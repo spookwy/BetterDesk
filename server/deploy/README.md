@@ -107,8 +107,25 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now bd-signaling
 
 # Файрвол внутри машины (вторая половина шага 2).
-sudo iptables -I INPUT 6 -m state --state NEW -p tcp --dport 9000 -j ACCEPT
+# Порт 9000 — ПЕРЕД запрещающим правилом, а не после.
+#
+# iptables читает список сверху вниз и останавливается на первом
+# совпадении. У Ubuntu на Oracle пятым правилом идёт REJECT «всё
+# остальное», поэтому разрешение, вставленное шестым, недостижимо:
+# до него никогда не доходит очередь.
+#
+# Проверено живьём: правило было на месте, сервер отвечал `ok` сам
+# себе (localhost правила не проходит), а снаружи — тишина. Симптом
+# неотличим от закрытого облачного файрвола, и потому диагностируется
+# долго.
+#
+# Номер строки REJECT смотреть перед вставкой — он может отличаться:
+#   sudo iptables -L INPUT -n --line-numbers
+sudo iptables -I INPUT 5 -m state --state NEW -p tcp --dport 9000 -j ACCEPT
 sudo netfilter-persistent save
+
+# Убедиться, что 9000 ВЫШЕ строки REJECT:
+sudo iptables -L INPUT -n --line-numbers | head -12
 ```
 
 ---
