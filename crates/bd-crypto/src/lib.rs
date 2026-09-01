@@ -7,6 +7,12 @@
 
 #![forbid(unsafe_code)]
 
+pub mod identity;
+pub mod keystore;
 pub mod password;
+pub mod pinning;
 
+pub use identity::{DeviceIdentity, DevicePublicKey, IdentityError};
+pub use keystore::{FileKeyStore, KeyStore, KeyStoreError};
 pub use password::{PasswordError, SessionPassword};
+pub use pinning::{PinVerdict, PinnedKeys, PinningError};

@@ -42,6 +42,8 @@ jobs:
   # (CLAUDE.md §4.2.1). Ломается незаметно, поэтому проверяется отдельно.
   #
   # bd-transport здесь же: он двигает байты и не знает про Windows.
+  # bd-crypto — тоже: сервер сигналинга проверяет подписи теми же
+  # типами, а DPAPI живёт за trait'ом KeyStore именно ради этого.
   # Первая же случайная платформенная зависимость закроет дорогу
   # к веб-клиенту и серверной части, и заметить это без отдельной
   # проверки будет негде — весь остальной CI работает на Windows.
@@ -51,6 +53,6 @@ jobs:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
       - name: Build portable crates on Linux
-        run: cargo build -p bd-core -p bd-transport
+        run: cargo build -p bd-core -p bd-transport -p bd-crypto
       - name: Test portable crates on Linux
-        run: cargo test -p bd-core -p bd-transport
+        run: cargo test -p bd-core -p bd-transport -p bd-crypto
