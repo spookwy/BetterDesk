@@ -173,18 +173,39 @@ impl Signaling {
     }
 
     /// Объявить себя хостом под этим ID.
-    pub fn register(&self, id: DeviceId, local_addr: SocketAddr) -> Result<()> {
+    ///
+    /// `external_addr` — внешний UDP-адрес от STUN. Без него сервер
+    /// отдаст клиенту адрес нашего **TCP**-соединения, и клиент будет
+    /// бить в порт, которого у нас нет (находка 65). `None` допустим:
+    /// в локальной сети STUN не нужен, а через интернет соединение
+    /// всё равно стоит попробовать.
+    pub fn register(
+        &self,
+        id: DeviceId,
+        local_addr: SocketAddr,
+        external_addr: Option<SocketAddr>,
+    ) -> Result<()> {
         self.send(ClientMessage::Register {
             id,
             local_addr: local_addr.to_string(),
+            external_addr: external_addr.map(|a| a.to_string()),
         })
     }
 
     /// Попросить адрес хоста с этим ID.
-    pub fn connect_to(&self, id: DeviceId, local_addr: SocketAddr) -> Result<()> {
+    ///
+    /// `external_addr` — см. [`Signaling::register`]: без него хост
+    /// получит наш TCP-порт и будет бить в никуда.
+    pub fn connect_to(
+        &self,
+        id: DeviceId,
+        local_addr: SocketAddr,
+        external_addr: Option<SocketAddr>,
+    ) -> Result<()> {
         self.send(ClientMessage::Connect {
             id,
             local_addr: local_addr.to_string(),
+            external_addr: external_addr.map(|a| a.to_string()),
         })
     }
 

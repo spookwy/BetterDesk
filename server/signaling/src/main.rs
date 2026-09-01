@@ -76,6 +76,9 @@ struct Host {
     /// Нужен, когда обе стороны в одной сети: там внешние адреса
     /// совпадают, и стучаться надо по локальному.
     local_addr: String,
+    /// Внешний UDP-адрес от STUN. `None` — старая версия или
+    /// STUN не ответил; тогда используется адрес TCP-соединения.
+    external_addr: Option<String>,
     /// Когда хост последний раз давал о себе знать.
     seen: Instant,
     /// Куда слать сообщения этому хосту.
@@ -111,6 +114,56 @@ async fn main() -> anyhow::Result<()> {
                 let removed = before - guard.len();
                 if removed > 0 {
                     tracing::info!(removed, live = guard.len(), "выметены протухшие хосты");
+                }
+            }
+        });
+    }
+
+    // UDP-STUN на том же порту, что и WebSocket.
+    //
+    // # Зачем он нужен отдельно от WebSocket
+    //
+    // Сервер видит клиента по TCP-соединению и знает его внешний
+    // **TCP**-порт. Долгое время он его и отдавал сторонам как адрес
+    // для пробивания NAT — и на одной машине это работало, потому
+    // что там стороны обмениваются локальными адресами.
+    //
+    // Через интернет первый же прогон провалился (находка 65):
+    // пробивание и QUIC идут по UDP, у которого свой внешний порт,
+    // и стороны били в TCP-порт друг друга. Внешний UDP-порт знает
+    // только NAT, и спросить его можно единственным способом —
+    // послать пакет с того самого сокета и узнать, каким его увидели.
+    //
+    // Тот же порт, а не соседний: иначе в файрволе VPS пришлось бы
+    // открывать второй, а инструкция по развёртыванию — это то, что
+    // человек выполняет один раз и не перечитывает.
+    {
+        let udp = tokio::net::UdpSocket::bind(listen).await?;
+        tracing::info!(%listen, "STUN слушает UDP");
+        tokio::spawn(async move {
+            let mut buf = [0u8; 64];
+            loop {
+                let (len, from) = match udp.recv_from(&mut buf).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        // Одна неудача не повод ронять слушателя:
+                        // на UDP ошибка часто описывает прошлый
+                        // пакет, а не состояние сокета (та же
+                        // причина, что у WSAECONNRESET в punch.rs).
+                        tracing::debug!(?e, "приём STUN");
+                        continue;
+                    }
+                };
+                if !bd_core::stun::is_request(&buf[..len]) {
+                    // Не наш пакет. Молча игнорируем: на публичный
+                    // порт прилетает что угодно, и отвечать всем
+                    // подряд значит работать усилителем для атак.
+                    tracing::trace!(%from, len, "не STUN-запрос");
+                    continue;
+                }
+                let reply = bd_core::stun::encode_reply(&from);
+                if let Err(e) = udp.send_to(&reply, from).await {
+                    tracing::debug!(?e, %from, "ответ STUN не ушёл");
                 }
             }
         });
@@ -255,7 +308,11 @@ async fn handle_message(
     registered_as: &mut Option<DeviceId>,
 ) -> Option<ServerMessage> {
     match msg {
-        ClientMessage::Register { id, local_addr } => {
+        ClientMessage::Register {
+            id,
+            local_addr,
+            external_addr,
+        } => {
             let mut guard = registry.write().await;
 
             // Предел реестра. Регистрация ничем не защищена до
@@ -281,6 +338,7 @@ async fn handle_message(
                 Host {
                     public_addr: peer,
                     local_addr,
+                    external_addr,
                     seen: Instant::now(),
                     tx: tx.clone(),
                 },
@@ -295,7 +353,11 @@ async fn handle_message(
             })
         }
 
-        ClientMessage::Connect { id, local_addr } => {
+        ClientMessage::Connect {
+            id,
+            local_addr,
+            external_addr,
+        } => {
             let guard = registry.read().await;
 
             let Some(host) = guard.get(&id) else {
@@ -325,7 +387,16 @@ async fn handle_message(
             let host_addr = if same_nat {
                 host.local_addr.clone()
             } else {
-                host.public_addr.to_string()
+                // Через интернет отдаём внешний UDP-адрес от STUN,
+                // а `public_addr` (адрес TCP-соединения) — только
+                // если STUN не ответил.
+                //
+                // Разница не косметическая: у TCP и UDP разные
+                // внешние порты, и пока отдавался TCP-адрес,
+                // пробивание не работало вовсе (находка 65).
+                host.external_addr
+                    .clone()
+                    .unwrap_or_else(|| host.public_addr.to_string())
             };
 
             // Хосту сообщаем, что к нему стучатся, и даём адрес
@@ -334,7 +405,9 @@ async fn handle_message(
             let client_addr = if same_nat {
                 local_addr
             } else {
-                peer.to_string()
+                // То же для клиента: хост будет бить в этот адрес,
+                // и TCP-порт здесь бесполезен.
+                external_addr.unwrap_or_else(|| peer.to_string())
             };
 
             let _ = host.tx.send(ServerMessage::PeerWants {

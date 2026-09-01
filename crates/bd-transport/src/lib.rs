@@ -48,5 +48,5 @@ pub use fragment::{
 pub use jitter::JitterBuffer;
 pub use loopback::{LinkProfile, LoopbackTransport, TransportStats};
 pub use packet::{FragmentHeader, PayloadKind, HEADER_SIZE, PROTOCOL_VERSION};
-pub use punch::{punch, reachable_addr, PunchOutcome};
+pub use punch::{discover_external_addr, punch, reachable_addr, PunchOutcome};
 pub use quic::{QuicTransport, Role};

@@ -86,6 +86,24 @@ pub enum ClientMessage {
         id: DeviceId,
         /// Локальный адрес, на котором хост слушает QUIC.
         local_addr: String,
+        /// Внешний UDP-адрес, как его увидел STUN.
+        ///
+        /// # Почему сервер не может выяснить это сам
+        ///
+        /// Сервер видит наше WebSocket-соединение, то есть TCP, и
+        /// знает его внешний порт. Внешний порт **UDP-сокета** у NAT
+        /// другой, и связи между ними нет никакой.
+        ///
+        /// Пока сервер отдавал сторонам TCP-адрес, пробивание не
+        /// работало через интернет вовсе: обе стороны били в порт,
+        /// которого у собеседника нет (находка 65). На одной машине
+        /// дефект не проявлялся — там стороны обмениваются
+        /// локальными адресами, где порт настоящий.
+        ///
+        /// `None` означает «STUN не ответил» либо сообщение от старой
+        /// версии. Тогда сервер отдаёт TCP-адрес, как раньше: хуже
+        /// не станет, а в локальной сети это и не нужно.
+        external_addr: Option<String>,
     },
 
     /// «Хочу подключиться к устройству с таким ID».
@@ -94,6 +112,11 @@ pub enum ClientMessage {
         id: DeviceId,
         /// Свой локальный адрес, чтобы хост знал, куда отвечать.
         local_addr: String,
+        /// Внешний UDP-адрес, как его увидел STUN.
+        ///
+        /// Смысл тот же, что у [`ClientMessage::Register`]: без него
+        /// хост бьёт в TCP-порт клиента, то есть в никуда.
+        external_addr: Option<String>,
     },
 
     /// «Я жив» — чтобы сервер не считал хост отвалившимся.
@@ -150,11 +173,36 @@ impl ClientMessage {
     /// Закодировать для отправки.
     pub fn encode(&self) -> String {
         match self {
-            Self::Register { id, local_addr } => {
-                format!("register{SEP}{}{SEP}{}", id.to_compact(), local_addr)
+            // Внешний адрес — необязательное четвёртое поле.
+            //
+            // Именно необязательное, а не новый вид сообщения:
+            // стороны обновляются не одновременно, и старый клиент
+            // должен продолжать работать с новым сервером. Пустая
+            // строка вместо пропуска поля — чтобы разделителей всегда
+            // было поровну и разбор не зависел от их числа.
+            Self::Register {
+                id,
+                local_addr,
+                external_addr,
+            } => {
+                format!(
+                    "register{SEP}{}{SEP}{}{SEP}{}",
+                    id.to_compact(),
+                    local_addr,
+                    external_addr.as_deref().unwrap_or("")
+                )
             }
-            Self::Connect { id, local_addr } => {
-                format!("connect{SEP}{}{SEP}{}", id.to_compact(), local_addr)
+            Self::Connect {
+                id,
+                local_addr,
+                external_addr,
+            } => {
+                format!(
+                    "connect{SEP}{}{SEP}{}{SEP}{}",
+                    id.to_compact(),
+                    local_addr,
+                    external_addr.as_deref().unwrap_or("")
+                )
             }
             Self::KeepAlive => "ping".to_string(),
         }
@@ -176,21 +224,31 @@ impl ClientMessage {
             "register" => {
                 let id = DeviceId::parse(parts.next()?)?;
                 let local_addr = validate_addr(parts.next()?)?;
+                let external_addr = parse_optional_addr(parts.next())?;
                 // Лишние поля — признак другой версии протокола или
                 // подделки. Игнорировать их значит согласиться
                 // работать с тем, чего мы не понимаем.
                 if parts.next().is_some() {
                     return None;
                 }
-                Some(Self::Register { id, local_addr })
+                Some(Self::Register {
+                    id,
+                    local_addr,
+                    external_addr,
+                })
             }
             "connect" => {
                 let id = DeviceId::parse(parts.next()?)?;
                 let local_addr = validate_addr(parts.next()?)?;
+                let external_addr = parse_optional_addr(parts.next())?;
                 if parts.next().is_some() {
                     return None;
                 }
-                Some(Self::Connect { id, local_addr })
+                Some(Self::Connect {
+                    id,
+                    local_addr,
+                    external_addr,
+                })
             }
             "ping" => {
                 if parts.next().is_some() {
@@ -300,10 +358,51 @@ fn validate_addr(s: &str) -> Option<String> {
     Some(s.to_string())
 }
 
+/// Разобрать необязательное поле адреса.
+///
+/// Три случая, и все три законны:
+/// - поля нет вовсе (`None` на входе) — сообщение старой версии;
+/// - поле пустое — сторона новая, но STUN не ответил;
+/// - поле с адресом — проверяем его как обычный адрес.
+///
+/// Внешний `Option` в результате отличает «разобрали» от «мусор»:
+/// вернуть `Some(None)` и `None` — разные исходы, и путать их
+/// нельзя (тот же урок, что в находке 38б про два смысла `None`).
+fn parse_optional_addr(field: Option<&str>) -> Option<Option<String>> {
+    match field {
+        None => Some(None),
+        Some("") => Some(None),
+        Some(s) => validate_addr(s).map(Some),
+    }
+}
+
 impl fmt::Display for ServerMessage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.encode())
     }
+}
+
+/// Адрес STUN, выведенный из URL сигналинга.
+///
+/// STUN живёт на **том же хосте и том же порту**, что и WebSocket,
+/// только по UDP (см. `bd_core::stun`). Отдельного адреса не
+/// заводится намеренно: две настройки вместо одной означали бы, что
+/// их можно рассогласовать, а человек, поднявший свой сервер, узнал
+/// бы об этом только на неработающем пробивании.
+///
+/// Возвращает `None`, если URL не разбирается: тогда STUN просто не
+/// используется, а соединение всё равно стоит попробовать.
+pub fn stun_addr_from_url(url: &str) -> Option<String> {
+    // `ws://host:port/path` → `host:port`. Разбор вручную: тянуть
+    // крейт URL в bd-core ради одной строки нельзя (§4.2.1).
+    let rest = url
+        .strip_prefix("ws://")
+        .or_else(|| url.strip_prefix("wss://"))?;
+    let authority = rest.split('/').next()?;
+    if authority.is_empty() || !authority.contains(':') {
+        return None;
+    }
+    Some(authority.to_string())
 }
 
 #[cfg(test)]
@@ -320,10 +419,18 @@ mod tests {
             ClientMessage::Register {
                 id: id(),
                 local_addr: "192.168.1.5:7000".into(),
+                external_addr: Some("203.0.113.7:41234".into()),
+            },
+            // Без внешнего адреса: STUN не ответил или сторона старая.
+            ClientMessage::Register {
+                id: id(),
+                local_addr: "192.168.1.5:7000".into(),
+                external_addr: None,
             },
             ClientMessage::Connect {
                 id: id(),
                 local_addr: "10.0.0.2:51000".into(),
+                external_addr: None,
             },
             ClientMessage::KeepAlive,
         ];
@@ -426,6 +533,72 @@ mod tests {
         // подделать разбор у собеседника.
         assert_eq!(
             ClientMessage::parse("register\t418207356\t1.2.3.4:7000\u{7}"),
+            None
+        );
+    }
+
+    #[test]
+    fn stun_addr_follows_signaling_url() {
+        assert_eq!(
+            stun_addr_from_url("ws://89.168.99.202:9000/ws").as_deref(),
+            Some("89.168.99.202:9000")
+        );
+        assert_eq!(
+            stun_addr_from_url("wss://example.com:443/ws").as_deref(),
+            Some("example.com:443")
+        );
+        // Вшитый адрес обязан разбираться: если он перестанет,
+        // пробивание тихо останется без STUN.
+        assert!(stun_addr_from_url(DEFAULT_SIGNALING).is_some());
+    }
+
+    #[test]
+    fn stun_addr_rejects_garbage() {
+        // Проверка обязана уметь отвергать (находка 4).
+        assert_eq!(stun_addr_from_url("http://host:9000/ws"), None);
+        assert_eq!(stun_addr_from_url("ws://host/ws"), None, "без порта");
+        assert_eq!(stun_addr_from_url("ws:///ws"), None);
+        assert_eq!(stun_addr_from_url(""), None);
+    }
+
+    #[test]
+    fn old_clients_without_external_field_still_parse() {
+        // Стороны обновляются не одновременно: клиент старой версии
+        // шлёт три поля вместо четырёх, и сервер обязан его понять.
+        // Иначе обновление сервера разом отключило бы всех, кто ещё
+        // не обновился.
+        let old = "register\t418207356\t192.168.1.5:7000";
+        assert_eq!(
+            ClientMessage::parse(old),
+            Some(ClientMessage::Register {
+                id: DeviceId::parse("418207356").unwrap(),
+                local_addr: "192.168.1.5:7000".into(),
+                external_addr: None,
+            })
+        );
+
+        // Пустое четвёртое поле — новая версия, но STUN не ответил.
+        let empty = "register\t418207356\t192.168.1.5:7000\t";
+        assert!(matches!(
+            ClientMessage::parse(empty),
+            Some(ClientMessage::Register {
+                external_addr: None,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn external_addr_is_validated_like_any_other() {
+        // Поле приходит из сети и доверия не заслуживает (§8.5).
+        // Проверка обязана уметь отвергать — иначе она ничего не
+        // значит (находка 4).
+        assert_eq!(
+            ClientMessage::parse("register\t418207356\t1.2.3.4:7000\tбез-порта"),
+            None
+        );
+        assert_eq!(
+            ClientMessage::parse("register\t418207356\t1.2.3.4:7000\t1.2.3.4:80\u{7}"),
             None
         );
     }

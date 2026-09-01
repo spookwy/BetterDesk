@@ -979,8 +979,22 @@ mod run {
                 .local_addr()
                 .map_err(|e| anyhow::anyhow!("не удалось узнать свой адрес: {e}"))?,
         );
+        // Внешний UDP-адрес спрашиваем у STUN тем же сокетом.
+        //
+        // Без этого хост получает адрес нашего WebSocket-соединения,
+        // то есть внешний **TCP**-порт, и бьёт в него. У UDP-сокета
+        // порт другой — NAT заводит своё отображение. Первый прогон
+        // между двумя машинами провалился ровно поэтому (находка 65).
+        let external = bd_core::signaling::stun_addr_from_url(signaling_url)
+            .and_then(|a| a.parse().ok())
+            .and_then(|stun| bd_transport::discover_external_addr(socket, stun));
+        match external {
+            Some(addr) => println!("Мой внешний UDP-адрес: {addr}"),
+            None => println!("⚠  STUN не ответил — пробивание NAT может не сработать."),
+        }
+
         signaling
-            .connect_to(id, own)
+            .connect_to(id, own, external)
             .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         // Ждём ответа. 15 секунд с запасом: сервер отвечает мгновенно,

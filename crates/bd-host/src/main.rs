@@ -293,6 +293,12 @@ mod run {
         //
         // `--no-signaling` оставлен для прогонов, где сервер только
         // мешает: замеры в LAN не должны зависеть от его доступности.
+        // Сокет для STUN и пробивания создаётся один раз: новый
+        // получил бы у NAT другое отображение, и объявленный порт
+        // стал бы неверным (находка 65).
+        let mut stun_external: Option<SocketAddr> = None;
+        let mut stun_socket: Option<std::net::UdpSocket> = None;
+
         let _signaling = match signaling_url() {
             Some(url) => {
                 let id = device_id();
@@ -314,7 +320,49 @@ mod run {
                         // сервер отдаёт его клиенту, когда обе стороны
                         // за одним NAT (тогда внешние адреса совпадают
                         // и через них они друг друга не увидят).
-                        sig.register(id, bd_transport::reachable_addr(bind))?;
+                        // Внешний UDP-адрес спрашиваем у STUN, а не
+                        // берём у сервера.
+                        //
+                        // Сервер видит наше WebSocket-соединение,
+                        // то есть TCP: его внешний порт НЕ равен
+                        // внешнему порту UDP-сокета, на котором пойдут
+                        // данные. Раньше отдавался именно он, и первый
+                        // же прогон между двумя машинами провалился —
+                        // стороны били в TCP-порт друг друга
+                        // (находка 65).
+                        //
+                        // Спрашиваем с ТОГО ЖЕ сокета, что уйдёт в
+                        // QUIC: у другого NAT завёл бы своё
+                        // отображение, и мы объявили бы чужой порт.
+                        if let Some(stun) = bd_core::signaling::stun_addr_from_url(&url)
+                            .and_then(|a| a.parse().ok())
+                        {
+                            match std::net::UdpSocket::bind(bind) {
+                                Ok(sock) => {
+                                    if let Some(external) =
+                                        bd_transport::discover_external_addr(&sock, stun)
+                                    {
+                                        println!("Внешний UDP-адрес: {external}");
+                                        stun_external = Some(external);
+                                    }
+                                    // Сокет живёт дальше: им же будем
+                                    // пробивать и его отдадим quinn.
+                                    // Открыть новый значило бы получить
+                                    // у NAT другое отображение — и
+                                    // объявленный клиенту порт стал бы
+                                    // неверным.
+                                    stun_socket = Some(sock);
+                                }
+                                Err(e) => {
+                                    println!("⚠  Не удалось занять {bind} для STUN: {e}");
+                                }
+                            }
+                        }
+                        if stun_external.is_none() {
+                            println!("⚠  STUN не ответил — пробивание NAT может не сработать.");
+                        }
+
+                        sig.register(id, bd_transport::reachable_addr(bind), stun_external)?;
 
                         // Ждём подтверждения: без него неизвестно,
                         // принял ли сервер регистрацию, и человек
@@ -386,7 +434,7 @@ mod run {
         //
         // Без сигналинга ничего этого не нужно: в локальной сети
         // адрес достижим напрямую.
-        let mut session = match punch_towards_peer(_signaling.as_ref(), bind) {
+        let mut session = match punch_towards_peer(_signaling.as_ref(), bind, stun_socket) {
             Some(socket) => QuicTransport::host_on_socket(socket, ACCEPT_TIMEOUT, epoch)?,
             None => QuicTransport::host(bind, ACCEPT_TIMEOUT, epoch)?,
         };
@@ -701,6 +749,7 @@ mod run {
     fn punch_towards_peer(
         signaling: Option<&Signaling>,
         bind: SocketAddr,
+        socket: Option<std::net::UdpSocket>,
     ) -> Option<std::net::UdpSocket> {
         let signaling = signaling?;
 
@@ -742,14 +791,24 @@ mod run {
             }
         };
 
-        // Сокет на ТОМ ЖЕ порту, что объявлен серверу: клиент получил
-        // именно его и бьёт туда.
-        let socket = match std::net::UdpSocket::bind(bind) {
-            Ok(s) => s,
-            Err(e) => {
-                println!("⚠  Не удалось занять {bind}: {e}");
-                return None;
-            }
+        // Сокет ТОТ ЖЕ, которым спрашивали STUN.
+        //
+        // Открой мы новый — NAT завёл бы для него другое отображение
+        // и, возможно, другой внешний порт. Клиенту при этом ушёл бы
+        // порт от первого сокета, и он бил бы в никуда: ровно та
+        // ошибка, которую чиним (находка 65), только на шаг позже.
+        //
+        // Поэтому сокет создаётся один раз, до регистрации, и живёт
+        // до передачи в quinn.
+        let socket = match socket {
+            Some(s) => s,
+            None => match std::net::UdpSocket::bind(bind) {
+                Ok(s) => s,
+                Err(e) => {
+                    println!("⚠  Не удалось занять {bind}: {e}");
+                    return None;
+                }
+            },
         };
 
         match bd_transport::punch(&socket, peer) {

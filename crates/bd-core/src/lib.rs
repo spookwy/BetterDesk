@@ -16,6 +16,7 @@ pub mod input;
 pub mod metrics;
 pub mod pacing;
 pub mod signaling;
+pub mod stun;
 pub mod time;
 
 pub use clocksync::ClockSync;

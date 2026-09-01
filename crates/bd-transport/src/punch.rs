@@ -131,6 +131,77 @@ pub fn reachable_addr(addr: SocketAddr) -> SocketAddr {
     }
 }
 
+/// Сколько ждать ответа STUN.
+///
+/// Три попытки по 300 мс: датаграм может потеряться, а лишняя
+/// секунда на старте сессии незаметна против неработающего
+/// соединения.
+const STUN_ATTEMPTS: usize = 3;
+const STUN_TIMEOUT: Duration = Duration::from_millis(300);
+
+/// Узнать свой внешний UDP-адрес у сигналинга.
+///
+/// # Почему нельзя обойтись адресом WebSocket-соединения
+///
+/// Можно было бы взять адрес, который сервер видит у нашего
+/// TCP-соединения, — так и было сделано сначала. Через интернет это
+/// **не работает**: TCP и UDP получают у NAT разные внешние порты,
+/// и первый же прогон между двумя машинами провалился, потому что
+/// стороны били в TCP-порт друг друга (находка 65).
+///
+/// Внешний UDP-порт знает только NAT. Единственный способ узнать
+/// его — послать пакет **с того самого сокета**, на котором пойдут
+/// данные, и спросить, каким его увидели снаружи.
+///
+/// `socket` обязан быть тем же, что уйдёт в QUIC: спроси мы с
+/// другого, NAT выдал бы ему свой порт, и мы объявили бы чужой —
+/// ровно тот дефект, который и чиним.
+///
+/// Возвращает `None`, если сервер не ответил. Это не повод падать:
+/// в локальной сети STUN не нужен, а через интернет соединение
+/// всё равно стоит попробовать — вдруг NAT мягкий.
+pub fn discover_external_addr(socket: &UdpSocket, stun_server: SocketAddr) -> Option<SocketAddr> {
+    // Режим сокета восстанавливается перед выходом: он ещё пойдёт в
+    // пробивание и в quinn, и отдавать его в чужом состоянии значит
+    // напрашиваться на разницу поведения между платформами.
+    let restore = socket.read_timeout().ok().flatten();
+    if socket.set_read_timeout(Some(STUN_TIMEOUT)).is_err() {
+        return None;
+    }
+
+    let mut result = None;
+    let mut buf = [0u8; bd_core::stun::STUN_MAX_REPLY];
+
+    for attempt in 0..STUN_ATTEMPTS {
+        if let Err(e) = socket.send_to(bd_core::stun::STUN_REQUEST, stun_server) {
+            tracing::debug!(?e, attempt, "STUN-запрос не ушёл");
+            continue;
+        }
+        match socket.recv_from(&mut buf) {
+            Ok((len, from)) => {
+                // Отвечать может кто угодно: сокет открыт наружу.
+                // Принимаем ответ только от того, кого спрашивали.
+                if from != stun_server {
+                    tracing::debug!(%from, "STUN-ответ не от сервера — игнорирую");
+                    continue;
+                }
+                match bd_core::stun::decode_reply(&buf[..len]).and_then(|s| s.parse().ok()) {
+                    Some(addr) => {
+                        tracing::info!(%addr, attempt, "внешний UDP-адрес определён");
+                        result = Some(addr);
+                        break;
+                    }
+                    None => tracing::debug!(len, "непонятный ответ STUN"),
+                }
+            }
+            Err(e) => tracing::debug!(?e, attempt, "STUN без ответа"),
+        }
+    }
+
+    let _ = socket.set_read_timeout(restore);
+    result
+}
+
 /// Итог пробивания.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PunchOutcome {
