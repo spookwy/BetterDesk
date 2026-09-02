@@ -156,7 +156,19 @@ mod run {
         // 60: битрейт, VBV и период Intra Refresh считались от частоты,
         // которой не было. Ровно тот класс, что в находке 62 — значение
         // объявлено флагом, но до потребителя не доходит.
-        let fps_limit = parse_fps().unwrap_or(60);
+        // Профиль сессии — связка размена «задержка ↔ качество».
+        //
+        // Он задаёт УМОЛЧАНИЯ, а явные флаги их перекрывают. Порядок
+        // именно такой, а не наоборот: человек, написавший `--fps 30`,
+        // сказал это про частоту прямо, а профиль — лишь про общее
+        // направление. Отменять прямое указание общим — то же самое,
+        // что контроллер делал с `--fec` до появления пола.
+        let profile = parse_profile().unwrap_or_default();
+        if parse_profile().is_some() {
+            println!("Профиль: {}", profile.name());
+        }
+
+        let fps_limit = parse_fps().unwrap_or_else(|| profile.fps_limit());
 
         // `--fps 0` снимает предел частоты у ограничителя, но энкодеру
         // нужна конкретная цифра: на нуле битрейт схлопнулся бы в
@@ -166,7 +178,7 @@ mod run {
         // Избыточность (FEC) задаёт отправитель, то есть хост.
         let fec_policy = parse_fec();
 
-        let encoder_config = build_encoder_config(size, encoder_fps);
+        let encoder_config = build_encoder_config(size, encoder_fps, profile);
         let target_bitrate = encoder_config.rate_control.target_bitrate();
         println!(
             "Энкодер: H.264 {}x{}@{}, CBR {:.1} Мбит/с{}",
@@ -626,6 +638,11 @@ mod run {
             // верное, но решает не тот вопрос — сколько добавить
             // сверх, а не можно ли отменить просьбу владельца.
             config.min_fec_percent = fec_policy.redundancy_percent();
+            // Профиль настраивает и контроллер: «Скорость» реагирует
+            // на затор раньше и резче, «Качество» — осторожнее.
+            // Иначе выбор человека отменился бы сам через несколько
+            // секунд работы контроллера.
+            profile.tune(&mut config);
             Some(bd_core::RateController::new(config))
         };
         let mut applied_bitrate = target_bitrate;
@@ -754,7 +771,7 @@ mod run {
                         size = fresh;
                         encoder = AnyEncoder::new(
                             capturer.device(),
-                            build_encoder_config(size, encoder_fps),
+                            build_encoder_config(size, encoder_fps, profile),
                             epoch,
                         )?;
                     }
@@ -1457,6 +1474,10 @@ mod run {
         println!("  --fps N              предел частоты кодирования (по умолчанию 60)");
         println!("  --bitrate МБИТ       битрейт вручную, напр. --bitrate 8");
         println!("  --quality low|medium|high   пресет качества (от расчётного)");
+        println!("  --profile quality|balanced|speed");
+        println!("                       размен «задержка ↔ картинка»:");
+        println!("                       задаёт битрейт, частоту, FEC и");
+        println!("                       резкость реакции на затор разом");
         println!("  --fec [ПРОЦЕНТ]      защита от потерь (по умолчанию выкл.,");
         println!("                       с флагом 20 %). Через интернет — нужна");
         println!("  --inject-input       применять ввод клиента (по умолчанию НЕТ)");
@@ -1508,16 +1529,27 @@ mod run {
     /// отменив заданный человеком (находка 62 — ровно про разошедшиеся
     /// копии одного условия).
     ///
-    /// Приоритет: явный `--bitrate` перекрывает `--quality`. Если
-    /// человек назвал точную цифру, она и означает намерение.
-    fn build_encoder_config(size: FrameSize, fps: u32) -> EncoderConfig {
+    /// Приоритет: явный `--bitrate` перекрывает `--quality`, а тот —
+    /// профиль. Чем прямее сказано, тем сильнее указание: точная
+    /// цифра однозначнее пресета, пресет однозначнее общего
+    /// направления.
+    fn build_encoder_config(
+        size: FrameSize,
+        fps: u32,
+        profile: bd_core::SessionProfile,
+    ) -> EncoderConfig {
         if let Some(bitrate) = parse_bitrate() {
             return EncoderConfig::with_bitrate(size, fps, bitrate);
         }
-        match parse_preset() {
-            Some(preset) => EncoderConfig::preset(size, fps, preset),
-            None => EncoderConfig::low_latency(size, fps),
+        if let Some(preset) = parse_preset() {
+            return EncoderConfig::preset(size, fps, preset);
         }
+        // Профиль масштабирует расчётный битрейт своим множителем.
+        // «Баланс» множит на единицу, то есть до появления профилей
+        // поведение было ровно таким — и остаётся, пока флаг не задан.
+        let auto = EncoderConfig::low_latency(size, fps);
+        let scaled = profile.apply_bitrate(auto.rate_control.target_bitrate());
+        EncoderConfig::with_bitrate(size, fps, scaled)
     }
 
     /// Разобрать `--bitrate МБИТ`.
@@ -1552,12 +1584,30 @@ mod run {
             None if parse_flag("--fec") => {
                 bd_transport::FecPolicy::Fixed(bd_transport::DEFAULT_REDUNDANCY_PERCENT)
             }
-            None => bd_transport::FecPolicy::Off,
+            // Без флага избыточность берётся из профиля.
+            //
+            // Умолчание остаётся выключенным («Баланс» без флага дал
+            // бы 20 %, чего до сих пор не было), поэтому профиль
+            // спрашивается только когда он ЗАДАН явно. Иначе включение
+            // FEC оказалось бы побочным следствием правки, которую
+            // никто об этом не просил.
+            None => match parse_profile() {
+                Some(p) => match p.default_fec_percent() {
+                    0 => bd_transport::FecPolicy::Off,
+                    percent => bd_transport::FecPolicy::Fixed(percent),
+                },
+                None => bd_transport::FecPolicy::Off,
+            },
         }
     }
 
     fn parse_fps() -> Option<u32> {
         parse_arg("--fps").and_then(|v| v.parse().ok())
+    }
+
+    /// Разобрать `--profile quality|balanced|speed`.
+    fn parse_profile() -> Option<bd_core::SessionProfile> {
+        bd_core::SessionProfile::parse(&parse_arg("--profile")?)
     }
 
     fn parse_arg(name: &str) -> Option<String> {

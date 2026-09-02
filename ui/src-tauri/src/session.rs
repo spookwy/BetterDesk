@@ -67,7 +67,11 @@ pub struct LaunchOptions {
     /// Пароль сессии. Только для клиента.
     #[serde(default)]
     pub password: String,
-    /// Пресет качества: low / medium / high.
+    /// Профиль сессии: speed / balanced / quality.
+    ///
+    /// Имя поля осталось `quality` — оно едет с экрана и менять его
+    /// значило бы править вёрстку, бэкенд и тест соответствия разом
+    /// ради косметики (находка 69: расхождение имён тихое).
     #[serde(default)]
     pub quality: String,
     /// Включить защиту от потерь.
@@ -292,8 +296,16 @@ fn build_args(role: Role, options: &LaunchOptions) -> Vec<String> {
     // пользуется тем, что ему шлют. Отдать эти ручки клиенту значило
     // бы завести настройку, которая ни на что не влияет.
     if role == Role::Host {
-        if matches!(options.quality.as_str(), "low" | "medium" | "high") {
-            args.push("--quality".into());
+        // Профиль, а не `--quality`: он задаёт битрейт, частоту, FEC
+        // и резкость реакции контроллера разом. Одна шкала битрейта
+        // отвечала не на тот вопрос — человек выбирает размен
+        // «отклик против картинки», а не число мегабит.
+        //
+        // Имя проверяется здесь, а не отдаётся хосту как есть: чужая
+        // строка в аргументах процесса — это то, чему доверять не
+        // надо, а неизвестное имя хост молча заменил бы умолчанием.
+        if matches!(options.quality.as_str(), "speed" | "balanced" | "quality") {
+            args.push("--profile".into());
             args.push(options.quality.clone());
         }
         if options.fec {
@@ -442,20 +454,20 @@ mod tests {
     }
 
     #[test]
-    fn quality_and_fec_go_to_host_only() {
+    fn profile_and_fec_go_to_host_only() {
         let mut o = opts();
-        o.quality = "low".into();
+        o.quality = "speed".into();
         o.fec = true;
         o.peer_id = "955235149".into();
 
         let host = build_args(Role::Host, &o);
-        assert!(host.contains(&"--quality".to_string()));
+        assert!(host.contains(&"--profile".to_string()));
         assert!(host.contains(&"--fec".to_string()));
 
         // Клиенту эти ручки не нужны: избыточность и битрейт задаёт
         // отправитель, и настройка на клиенте ни на что не влияла бы.
         let client = build_args(Role::Client, &o);
-        assert!(!client.contains(&"--quality".to_string()));
+        assert!(!client.contains(&"--profile".to_string()));
         assert!(!client.contains(&"--fec".to_string()));
     }
 
@@ -470,14 +482,53 @@ mod tests {
     }
 
     #[test]
-    fn garbage_quality_is_ignored() {
+    fn garbage_profile_is_ignored() {
         // Значение приходит из webview. Передать его дальше как есть
         // значило бы отдать чужой строке место в командной строке.
         let mut o = opts();
         o.quality = "--inject-input".into();
         let args = build_args(Role::Host, &o);
         assert!(!args.contains(&"--inject-input".to_string()));
-        assert!(!args.contains(&"--quality".to_string()));
+        assert!(!args.contains(&"--profile".to_string()));
+    }
+
+    /// Имена профилей на экране, в оболочке и у хоста — одни и те же.
+    ///
+    /// # Зачем тест на очевидное
+    ///
+    /// Здесь три независимых списка: `<option value>` в `index.html`,
+    /// `matches!` в [`build_args`] и разбор в
+    /// `bd_core::SessionProfile::parse`. Разойдись любые два — профиль
+    /// **молча** перестанет применяться: экран покажет выбор, кнопка
+    /// сработает, сессия пойдёт с умолчанием, и понять это можно
+    /// будет только по битрейту в журнале.
+    ///
+    /// Ровно тот класс, что находка 69 (camelCase против snake_case) и
+    /// находка 57б: обе стороны по отдельности верны, а вместе не
+    /// работают.
+    #[test]
+    fn every_screen_profile_reaches_the_host() {
+        // Значения — те же строки, что стоят в `<option value>`.
+        for name in ["speed", "balanced", "quality"] {
+            let mut o = opts();
+            o.quality = name.into();
+            let args = build_args(Role::Host, &o);
+
+            assert!(
+                args.contains(&"--profile".to_string()),
+                "профиль «{name}» не доехал до хоста: экран и оболочка разошлись"
+            );
+            assert!(
+                args.contains(&name.to_string()),
+                "профиль «{name}» подменён по дороге"
+            );
+            // И хост обязан это имя понять — иначе он подставит
+            // умолчание, снова молча.
+            assert!(
+                bd_core::SessionProfile::parse(name).is_some(),
+                "хост не знает профиля «{name}»"
+            );
+        }
     }
 
     #[test]
@@ -496,7 +547,7 @@ mod tests {
         // Тот же класс, что находка 57б — вёрстка и бэкенд по
         // отдельности верны, а вместе не работают.
         let json = r#"{"peerId":"955235149","password":"301695",
-                       "quality":"low","fec":true,"allowInput":false}"#;
+                       "quality":"speed","fec":true,"allowInput":false}"#;
         let parsed: LaunchOptions = serde_json::from_str(json).expect("разбор");
         assert_eq!(parsed.peer_id, "955235149");
         assert_eq!(parsed.password, "301695");
