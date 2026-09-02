@@ -1,7 +1,12 @@
-# Seeds for failure cases proptest has generated in the past. It is
-# automatically read and these particular cases re-run before any
-# novel cases are generated.
+# Минимальные примеры, на которых тесты падали.
 #
-# It is recommended to check this file in to source control so that
-# everyone who runs the test benefits from these saved cases.
+# ВАЖНО: они получены НАМЕРЕННЫМИ подменами кода при проверке,
+# что тесты умеют проваливаться (CLAUDE.md, находка 4), а не
+# настоящими дефектами. На исправном коде все проходят.
+#
+# Файл под контролем версий сознательно: proptest прогоняет эти
+# случаи ПЕРВЫМИ, до случайных. То есть ровно те входы, которые
+# однажды ломали защиту, проверяются на каждом прогоне, а не
+# ждут, пока генератор набредёт на них снова.
+#
 cc cefc39f845eb7eda295a53433f365871601dfa84ecc61193ad156b88ab464dca # shrinks to sequence = 0, count = 1, overflow = 0
