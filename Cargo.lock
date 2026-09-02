@@ -207,6 +207,7 @@ dependencies = [
  "bd-core",
  "bd-crypto",
  "bd-input",
+ "bd-secrets",
  "bd-transport",
  "libloading 0.8.9",
  "tracing",
@@ -229,6 +230,16 @@ name = "bd-render"
 version = "0.1.0"
 dependencies = [
  "bd-core",
+ "thiserror 2.0.20",
+ "tracing",
+ "windows 0.62.2",
+]
+
+[[package]]
+name = "bd-secrets"
+version = "0.1.0"
+dependencies = [
+ "bd-crypto",
  "thiserror 2.0.20",
  "tracing",
  "windows 0.62.2",

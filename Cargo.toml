@@ -6,6 +6,7 @@ members = [
     "crates/bd-codec",
     "crates/bd-transport",
     "crates/bd-crypto",
+    "crates/bd-secrets",
     "crates/bd-input",
     "crates/bd-audio",
     "crates/bd-render",
@@ -31,6 +32,7 @@ bd-capture = { path = "crates/bd-capture" }
 bd-codec = { path = "crates/bd-codec" }
 bd-transport = { path = "crates/bd-transport" }
 bd-crypto = { path = "crates/bd-crypto" }
+bd-secrets = { path = "crates/bd-secrets" }
 bd-input = { path = "crates/bd-input" }
 bd-audio = { path = "crates/bd-audio" }
 bd-render = { path = "crates/bd-render" }

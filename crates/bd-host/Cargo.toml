@@ -14,6 +14,8 @@ libloading = "0.8"
 [dependencies]
 bd-core.workspace = true
 bd-crypto.workspace = true
+# Ключ устройства под защитой ОС (DPAPI) + перенос старого открытого.
+bd-secrets.workspace = true
 bd-capture.workspace = true
 bd-codec.workspace = true
 bd-input.workspace = true

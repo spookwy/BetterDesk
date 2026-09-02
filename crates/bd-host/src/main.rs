@@ -281,9 +281,15 @@ mod run {
         // а он при этом увидел бы обычное подключение — то есть
         // защита исчезла бы молча.
         let identity = {
-            use bd_crypto::KeyStore as _;
-            let store =
-                bd_crypto::FileKeyStore::new(bd_core::device::data_dir().join("device.key"));
+            // Хранилище под защитой ОС (DPAPI): скопировав файл, чужая
+            // машина не сможет выдать себя за эту — ключ шифруется
+            // учётными данными пользователя и компьютера (§7.3).
+            //
+            // `open_key_store` заодно переносит ключ, оставшийся от
+            // прежних версий открытым. Без переноса обновление
+            // программы сменило бы личность машины и подняло бы ложную
+            // тревогу о подмене у всех, кто её запомнил.
+            let store = bd_secrets::open_key_store(bd_core::device::data_dir().join("device.key"));
             match store.load_or_create() {
                 Ok(identity) => identity,
                 Err(e) => {
