@@ -615,9 +615,18 @@ mod run {
             println!("Контроллер битрейта ВЫКЛЮЧЕН (--fixed-rate).\n");
             None
         } else {
-            Some(bd_core::RateController::new(bd_core::RateConfig::new(
-                target_bitrate,
-            )))
+            let mut config = bd_core::RateConfig::new(target_bitrate);
+            // То, что человек включил флагом, контроллер отменять не
+            // вправе — он может только добавить сверх.
+            //
+            // Без этого живой прогон Москва — Франция показывал
+            // «FEC включён: +20 %» в шапке и «паритет 0 %» в каждой
+            // строке решения: при перегрузке контроллер обнулял
+            // паритет, потому что тот добавляет трафик. Рассуждение
+            // верное, но решает не тот вопрос — сколько добавить
+            // сверх, а не можно ли отменить просьбу владельца.
+            config.min_fec_percent = fec_policy.redundancy_percent();
+            Some(bd_core::RateController::new(config))
         };
         let mut applied_bitrate = target_bitrate;
         let mut applied_fec = fec_policy.redundancy_percent();

@@ -22,12 +22,12 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::VK_F9;
 use windows::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRect, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-    GetClientRect, PeekMessageW, PostQuitMessage, RegisterClassExW, ShowWindow, TranslateMessage,
-    CS_HREDRAW, CS_OWNDC, CS_VREDRAW, CW_USEDEFAULT, HCURSOR, MSG, PM_REMOVE, SW_SHOW, WM_CLOSE,
-    WM_DESTROY, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
-    WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT, WM_RBUTTONDOWN,
-    WM_RBUTTONUP, WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSEXW, WS_EX_APPWINDOW,
-    WS_OVERLAPPEDWINDOW,
+    GetClientRect, PeekMessageW, PostQuitMessage, RegisterClassExW, SetCursor, ShowWindow,
+    TranslateMessage, CS_HREDRAW, CS_OWNDC, CS_VREDRAW, CW_USEDEFAULT, HCURSOR, HTCLIENT, MSG,
+    PM_REMOVE, SW_SHOW, WM_CLOSE, WM_DESTROY, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+    WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    WNDCLASSEXW, WS_EX_APPWINDOW, WS_OVERLAPPEDWINDOW,
 };
 
 /// Имя оконного класса. Регистрируется один раз на процесс.
@@ -340,6 +340,35 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
         // здесь значило бы трогать D3D из оконной процедуры, которую
         // система может вызвать в неудобный момент.
         WM_SIZE => LRESULT(0),
+        // Свой курсор над видео не рисуется.
+        //
+        // # Почему пустого hCursor у класса НЕ ХВАТИЛО
+        //
+        // Живой прогон Москва — Франция показал два курсора и после
+        // того, как класс перестал задавать `IDC_ARROW`. Причина в
+        // том, что `hCursor` класса — лишь значение по умолчанию:
+        // при каждом движении мыши система шлёт `WM_SETCURSOR`, и
+        // `DefWindowProcW` в ответ ставит стандартную стрелку. То
+        // есть курсор возвращался на каждом же движении.
+        //
+        // Убрать его можно только ответив на это сообщение самим:
+        // `SetCursor(None)` прячет указатель, `LRESULT(1)` говорит
+        // системе, что мы разобрались и звать `DefWindowProc` не
+        // надо.
+        //
+        // # Почему только над клиентской областью
+        //
+        // Младшее слово `lparam` — код зоны попадания. Прячем курсор
+        // только над `HTCLIENT`, то есть над самой картинкой. На
+        // рамке и заголовке он обязан остаться: иначе окно нельзя
+        // будет ни потянуть за край, ни закрыть — человек попросту
+        // не увидит, куда целится.
+        WM_SETCURSOR if (lparam.0 as u32 & 0xFFFF) == HTCLIENT => {
+            // SAFETY: `None` — документированный способ убрать
+            // указатель; чужих указателей вызов не принимает.
+            unsafe { SetCursor(None) };
+            LRESULT(1)
+        }
         // F9 — переключение оверлея статистики (CLAUDE.md §10.4).
         // Обрабатывается только факт нажатия; сам оверлей переключает
         // цикл рендера, у которого есть доступ к состоянию.
