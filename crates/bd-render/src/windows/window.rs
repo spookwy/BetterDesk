@@ -22,12 +22,12 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::VK_F9;
 use windows::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRect, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-    GetClientRect, LoadCursorW, PeekMessageW, PostQuitMessage, RegisterClassExW, ShowWindow,
-    TranslateMessage, CS_HREDRAW, CS_OWNDC, CS_VREDRAW, CW_USEDEFAULT, IDC_ARROW, MSG, PM_REMOVE,
-    SW_SHOW, WM_CLOSE, WM_DESTROY, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL,
-    WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSEXW,
-    WS_EX_APPWINDOW, WS_OVERLAPPEDWINDOW,
+    GetClientRect, PeekMessageW, PostQuitMessage, RegisterClassExW, ShowWindow, TranslateMessage,
+    CS_HREDRAW, CS_OWNDC, CS_VREDRAW, CW_USEDEFAULT, HCURSOR, MSG, PM_REMOVE, SW_SHOW, WM_CLOSE,
+    WM_DESTROY, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
+    WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT, WM_RBUTTONDOWN,
+    WM_RBUTTONUP, WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSEXW, WS_EX_APPWINDOW,
+    WS_OVERLAPPEDWINDOW,
 };
 
 /// Имя оконного класса. Регистрируется один раз на процесс.
@@ -269,11 +269,6 @@ fn register_class(instance: HINSTANCE) -> Result<()> {
         return Ok(());
     }
 
-    // SAFETY: IDC_ARROW — стандартный системный курсор, для него
-    // hinstance должен быть None.
-    let cursor = unsafe { LoadCursorW(None, IDC_ARROW) }
-        .map_err(|e| RenderError::WindowCreation(format!("LoadCursorW: {e}")))?;
-
     let class = WNDCLASSEXW {
         cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
         // CS_OWNDC: окно получает собственный контекст устройства —
@@ -281,7 +276,34 @@ fn register_class(instance: HINSTANCE) -> Result<()> {
         style: CS_HREDRAW | CS_VREDRAW | CS_OWNDC,
         lpfnWndProc: Some(window_proc),
         hInstance: instance,
-        hCursor: cursor,
+        // Курсора у класса НЕТ — и это не упущение.
+        //
+        // Здесь стоял `IDC_ARROW`, и над видео оказывалось **два**
+        // курсора сразу: свой, который рисует Windows, и присланный
+        // хостом, который рисуем мы. Человек за клиентом видел, как
+        // чужая стрелка тянется за его собственной.
+        //
+        // Убирать надо именно свой, а не чужой, и порядок здесь
+        // обратный интуиции. Свой курсор мгновенный и оттого кажется
+        // «правильным» — но он показывает, где мышь у НАС, а не где
+        // она у хоста. Управляем же мы хостом: значимо только то,
+        // куда доехало нажатие. Оставь мы свой, человек целился бы
+        // им и промахивался ровно на задержку канала.
+        //
+        // Чужой курсор вдобавок несёт форму (стрелка, палочка, рука)
+        // — то есть показывает, что под ним на ТОЙ стороне. Свой об
+        // этом не знает ничего.
+        //
+        // Побочно исчезает и жалоба на «двойной курсор»: задержка
+        // никуда не делась, но глазу больше не с чем её сравнивать —
+        // раньше расхождение двух стрелок делало её заметной там,
+        // где сама по себе она не мешала.
+        //
+        // `HCURSOR(null)` означает «класс курсора не задаёт», и
+        // Windows не рисует в клиентской области ничего. Рамка и
+        // заголовок при этом свой курсор сохраняют — их рисует не
+        // класс, и тянуть окно за край по-прежнему можно.
+        hCursor: HCURSOR(std::ptr::null_mut()),
         lpszClassName: CLASS_NAME,
         ..Default::default()
     };
