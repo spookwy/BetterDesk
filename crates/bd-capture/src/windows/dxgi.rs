@@ -192,6 +192,16 @@ impl DxgiCapturer {
         self.device.device()
     }
 
+    /// Контекст того же устройства.
+    ///
+    /// Нужен тем, кто рисует на GPU по пути кадра, — сейчас это
+    /// [`Downscaler`](super::Downscaler). Брать чужой контекст нельзя:
+    /// команды выполняются на устройстве, которому принадлежит
+    /// текстура (§5.1).
+    pub fn context(&self) -> &windows::Win32::Graphics::Direct3D11::ID3D11DeviceContext {
+        self.device.context()
+    }
+
     /// Текущая дупликация.
     ///
     /// `None` возможен только внутри [`Capturer::recover`], между

@@ -4,9 +4,11 @@
 //! и выше) уходят только безопасные типы.
 
 mod device;
+mod downscale;
 mod dxgi;
 
 pub use device::D3dDevice;
+pub use downscale::Downscaler;
 pub use dxgi::{CursorState, DxgiCapturer, DxgiFrame};
 
 use crate::{CaptureError, MonitorInfo, Result};

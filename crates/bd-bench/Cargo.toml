@@ -74,3 +74,7 @@ path = "src/bin/machine_probe.rs"
 name = "mfenc_probe"
 path = "src/bin/mfenc_probe.rs"
 
+
+[[bin]]
+name = "downscale_probe"
+path = "src/bin/downscale_probe.rs"

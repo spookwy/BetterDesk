@@ -647,6 +647,14 @@ mod run {
         };
         let mut applied_bitrate = target_bitrate;
         let mut applied_fec = fec_policy.redundancy_percent();
+
+        // Уменьшение картинки — второй рычаг адаптации (этап 6).
+        //
+        // Нужен там, где снижать битрейт уже некуда: 1080p при
+        // мегабите нечитаем, и вчетверо меньше пикселей дают вчетверо
+        // больше бит на каждый.
+        let mut downscaler = bd_capture::windows::Downscaler::new(capturer.device())?;
+        let mut applied_divisor = 1u32;
         let mut last_link_state = bd_core::LinkState::Good;
         let mut link_state_changes = 0u64;
 
@@ -792,7 +800,36 @@ mod run {
                 continue;
             }
 
-            let Some(mut encoded) = encoder.encode(frame.texture(), *frame.info())? else {
+            // Уменьшение картинки, если контроллер так решил.
+            //
+            // Проход шейдера идёт ДО энкодера и не выходит из GPU
+            // (§4.2.3). При делителе 1 не делается вовсе: лишний
+            // проход стоил бы времени, ничего не давая.
+            let (encode_texture, encode_info) = if applied_divisor > 1 {
+                match downscaler.downscale(
+                    capturer.device(),
+                    capturer.context(),
+                    frame.texture(),
+                    applied_divisor,
+                ) {
+                    Ok(small) => {
+                        let mut info = *frame.info();
+                        info.size = scaled_size(size, applied_divisor);
+                        (small, info)
+                    }
+                    Err(e) => {
+                        // Не фатально: кодируем как есть. Отдать
+                        // картинку крупнее задуманного хуже, чем
+                        // оборвать сессию из-за неудачного прохода.
+                        tracing::warn!("уменьшение не удалось: {e}");
+                        (frame.texture(), *frame.info())
+                    }
+                }
+            } else {
+                (frame.texture(), *frame.info())
+            };
+
+            let Some(mut encoded) = encoder.encode(encode_texture, encode_info)? else {
                 continue;
             };
             encoded_frames += 1;
@@ -856,6 +893,50 @@ mod run {
                                 // что не удалось её улучшить, — хуже,
                                 // чем не улучшить.
                                 tracing::warn!("не удалось сменить битрейт: {e}");
+                            }
+                        }
+                    }
+
+                    // Смена размера картинки: энкодер пересоздаётся.
+                    //
+                    // NVENC не меняет геометрию на лету
+                    // (`nvEncReconfigureEncoder` покрывает битрейт, но
+                    // не размер), а декодер клиента ждёт SPS прежней
+                    // геометрии. Кодировать новый размер прежним
+                    // энкодером — значит отдать не ошибку, а поток
+                    // мусора на экране (находка 31).
+                    if decision.scale_divisor != applied_divisor {
+                        let target = scaled_size(size, decision.scale_divisor);
+                        match AnyEncoder::new(
+                            capturer.device(),
+                            build_encoder_config(target, encoder_fps, profile),
+                            epoch,
+                        ) {
+                            Ok(fresh) => {
+                                println!(
+                                    "Размер картинки: {}x{} (канал не тянет полный)",
+                                    target.width, target.height
+                                );
+                                encoder = fresh;
+                                applied_divisor = decision.scale_divisor;
+                                // Битрейт задан заново вместе с
+                                // энкодером — считать его прежним
+                                // нельзя.
+                                applied_bitrate =
+                                    build_encoder_config(target, encoder_fps, profile)
+                                        .rate_control
+                                        .target_bitrate();
+                                // Клиенту нужен ключевой кадр: у него
+                                // сменился SPS, и разностные кадры
+                                // опереться не на что.
+                                encoder.request_keyframe();
+                            }
+                            Err(e) => {
+                                // Не фатально: продолжаем в прежнем
+                                // размере. Оборвать сессию из-за
+                                // неудачной попытки её улучшить —
+                                // худший из исходов.
+                                tracing::warn!("не удалось сменить размер картинки: {e}");
                             }
                         }
                     }
@@ -1603,6 +1684,25 @@ mod run {
 
     fn parse_fps() -> Option<u32> {
         parse_arg("--fps").and_then(|v| v.parse().ok())
+    }
+
+    /// Размер картинки после уменьшения в `divisor` раз.
+    ///
+    /// Стороны округляются вниз до чётных: H.264 кодирует
+    /// макроблоками, и нечётная сторона заставила бы энкодер
+    /// выравнивать её самому — с полосой мусора по краю (находка 18).
+    ///
+    /// Обязан совпадать с тем, что считает `Downscaler`: разойдись
+    /// они, энкодер настроился бы на один размер, а текстуру получил
+    /// другого — то есть отказ вместо кадра.
+    fn scaled_size(size: FrameSize, divisor: u32) -> FrameSize {
+        if divisor <= 1 {
+            return size;
+        }
+        FrameSize {
+            width: (size.width / divisor).max(2) & !1,
+            height: (size.height / divisor).max(2) & !1,
+        }
     }
 
     /// Разобрать `--profile quality|balanced|speed`.
