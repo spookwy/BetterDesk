@@ -604,6 +604,26 @@ mod run {
         let mut last_keyframe_request = now();
         let mut recoveries = 0u64;
 
+        // Контроллер битрейта (этап 6).
+        //
+        // `--fixed-rate` его выключает: для замеров нужна
+        // воспроизводимость, а контроллер по определению меняет
+        // условия прогона. Без этого сравнить две версии кода стало бы
+        // нельзя — цифры разъезжались бы из-за канала, а не из-за
+        // изменений (тот же довод, что у заглушки транспорта).
+        let mut rate_controller = if parse_flag("--fixed-rate") {
+            println!("Контроллер битрейта ВЫКЛЮЧЕН (--fixed-rate).\n");
+            None
+        } else {
+            Some(bd_core::RateController::new(bd_core::RateConfig::new(
+                target_bitrate,
+            )))
+        };
+        let mut applied_bitrate = target_bitrate;
+        let mut applied_fec = fec_policy.redundancy_percent();
+        let mut last_link_state = bd_core::LinkState::Good;
+        let mut link_state_changes = 0u64;
+
         println!("Отдаю экран. Ctrl+C — завершить.\n");
 
         'session: loop {
@@ -777,6 +797,64 @@ mod run {
                     break;
                 }
             }
+
+            // Контроллер битрейта (этап 6).
+            //
+            // Спрашивается на каждом кадре, но решение принимает раз в
+            // интервал — он сам следит за временем. Звать реже значило
+            // бы терять наблюдения RTT, из которых складывается
+            // базовая линия.
+            //
+            // Место выбрано после отправки намеренно: статистика
+            // транспорта к этому моменту учла только что ушедший кадр,
+            // то есть решение принимается по самым свежим данным.
+            if let Some(controller) = rate_controller.as_mut() {
+                let transport = session.stats();
+                let sample = bd_core::LinkSample {
+                    rtt: session.rtt(),
+                    datagrams_sent: transport.datagrams_sent,
+                    datagrams_dropped: transport.datagrams_dropped,
+                };
+
+                let elapsed_micros = now().duration_since(started).as_micros() as u64;
+                if let Some(decision) = controller.observe(sample, elapsed_micros) {
+                    // Битрейт меняется только когда он ДЕЙСТВИТЕЛЬНО
+                    // изменился: `nvEncReconfigureEncoder` не бесплатен,
+                    // а решение чаще всего повторяет прежнее.
+                    if decision.bitrate != applied_bitrate {
+                        match encoder.set_bitrate(decision.bitrate) {
+                            Ok(()) => applied_bitrate = decision.bitrate,
+                            Err(e) => {
+                                // Не фатально: работаем на прежнем
+                                // битрейте. Ронять сессию из-за того,
+                                // что не удалось её улучшить, — хуже,
+                                // чем не улучшить.
+                                tracing::warn!("не удалось сменить битрейт: {e}");
+                            }
+                        }
+                    }
+
+                    if decision.fec_percent != applied_fec {
+                        session.set_fec(if decision.fec_percent == 0 {
+                            bd_transport::FecPolicy::Off
+                        } else {
+                            bd_transport::FecPolicy::Fixed(decision.fec_percent)
+                        });
+                        applied_fec = decision.fec_percent;
+                    }
+
+                    if controller.state() != last_link_state {
+                        last_link_state = controller.state();
+                        link_state_changes += 1;
+                        tracing::info!(
+                            "канал: {:?}, битрейт {:.1} Мбит/с, паритет {} %",
+                            last_link_state,
+                            decision.bitrate as f64 / 1_000_000.0,
+                            decision.fec_percent
+                        );
+                    }
+                }
+            }
         }
 
         // Всё, что клиент зажал, отпускается принудительно: иначе
@@ -803,6 +881,8 @@ mod run {
             cursor_updates,
             cursor_shapes,
             recoveries,
+            rate_controller.as_ref(),
+            link_state_changes,
             &session,
         );
 
@@ -979,6 +1059,8 @@ mod run {
         cursor_updates: u64,
         cursor_shapes: u64,
         recoveries: u64,
+        rate: Option<&bd_core::RateController>,
+        link_state_changes: u64,
         session: &QuicTransport,
     ) {
         let elapsed = now().duration_since(started);
@@ -1017,10 +1099,39 @@ mod run {
         // жалуется на рывки, а причина не видна.
         if stats.datagrams_dropped > 0 {
             println!(
-                "\n⚠  Отброшено {} датаграмов: канал не тянет битрейт.",
+                "\n⚠  Отброшено {} датаграмов: канал не тянул битрейт.",
                 stats.datagrams_dropped
             );
-            println!("   Адаптация битрейта — этап 6.");
+        }
+
+        // Что делал контроллер.
+        //
+        // Печатается всегда, когда он включён, — в том числе когда он
+        // не вмешивался. Молчание в отчёте неотличимо от отсутствия
+        // контроллера (находка 26: ноль срабатываний — это
+        // «неизвестно», а не «работает»), а нулевое число смен
+        // состояния при ровном канале — законный и ожидаемый результат.
+        match rate {
+            Some(controller) => {
+                let decision = controller.current();
+                println!(
+                    "\nКонтроллер канала: {:?}, смен состояния {}",
+                    controller.state(),
+                    link_state_changes
+                );
+                println!(
+                    "  битрейт на конец:  {:.1} Мбит/с, паритет {} %",
+                    decision.bitrate as f64 / 1_000_000.0,
+                    decision.fec_percent
+                );
+                if let Some(baseline) = controller.baseline_rtt() {
+                    println!(
+                        "  базовый RTT:       {:.1} мс (оценка чистого полёта)",
+                        baseline.as_secs_f64() * 1000.0
+                    );
+                }
+            }
+            None => println!("\nКонтроллер канала выключен (--fixed-rate)."),
         }
     }
 
@@ -1341,6 +1452,7 @@ mod run {
         println!("                       с флагом 20 %). Через интернет — нужна");
         println!("  --inject-input       применять ввод клиента (по умолчанию НЕТ)");
         println!("  --ask                спрашивать разрешение перед показом экрана");
+        println!("  --fixed-rate         не менять битрейт по состоянию канала");
         println!("  --seconds N          завершиться через N с (для замеров)");
         println!();
         println!("На клиенте:");
